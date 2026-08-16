@@ -193,7 +193,7 @@ fun HomeScreen(
                         // PERMANENT CYBER-BAR TOR PROGRESS
                         val progress =
                             when (torState) {
-                                is TorState.Starting -> torState.progress / 100f
+                                is TorState.Starting -> 0.5f
                                 is TorState.Running -> 1.0f
                                 else -> 0f
                             }
@@ -204,31 +204,23 @@ fun HomeScreen(
                                 else -> NeonCyan
                             }
 
-                        Spacer(modifier = Modifier.height(12.dp)) // Distance from text
+                        Spacer(modifier = Modifier.height(12.dp))
                         LinearProgressIndicator(
                             progress = { progress },
-                            modifier =
-                                Modifier
-                                    .fillMaxWidth()
-                                    .height(8.dp),
-                            // Double thickness
+                            modifier = Modifier.fillMaxWidth().height(8.dp),
                             color = barColor,
                             trackColor = Color.DarkGray.copy(alpha = 0.2f),
                             strokeCap = androidx.compose.ui.graphics.StrokeCap.Round,
                         )
-                        Spacer(modifier = Modifier.height(12.dp)) // Distance from status label below
+                        Spacer(modifier = Modifier.height(12.dp))
 
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            val remainingDays =
-                                maxOf(
-                                    0L,
-                                    (expiryDate - System.currentTimeMillis()) / (24 * 60 * 60 * 1000),
-                                )
+                            val remainingDays = maxOf(0L, (expiryDate - System.currentTimeMillis()) / (24 * 60 * 60 * 1000))
                             Text(
                                 text =
                                     when (torState) {
                                         is TorState.Running -> "Tor Connesso & Active v3 Service"
-                                        is TorState.Starting -> "Avvio Circuito Tor (${torState.progress}%)..."
+                                        is TorState.Starting -> "Avvio Circuito Tor..."
                                         is TorState.Stopped -> "Tor Inattivo"
                                         is TorState.Error -> "Errore Tor"
                                     },

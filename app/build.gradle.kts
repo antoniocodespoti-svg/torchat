@@ -1,8 +1,9 @@
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.kotlin.android") version "2.0.20"
     id("org.jlleitschuh.gradle.ktlint")
     id("io.gitlab.arturbosch.detekt")
+    id("org.jetbrains.kotlin.plugin.compose") version "2.0.20"
 }
 
 android {
@@ -49,9 +50,7 @@ android {
     buildFeatures {
         compose = true
     }
-    composeOptions {
-        kotlinCompilerExtensionVersion = "1.5.8"
-    }
+    // Removed legacy composeOptions for Kotlin 2.0+
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
@@ -82,7 +81,7 @@ dependencies {
     implementation("androidx.fragment:fragment-ktx:1.8.2")
 
     // Compose UI
-    implementation(platform("androidx.compose:compose-bom:2024.06.00"))
+    implementation(platform("androidx.compose:compose-bom:2024.09.03"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")
@@ -90,7 +89,7 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
 
     // Coroutines
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 
     // JSON Parsing & Crypto Helpers
     implementation("com.google.code.gson:gson:2.10.1")
@@ -105,7 +104,8 @@ dependencies {
     implementation("androidx.exifinterface:exifinterface:1.3.7")
 
     // Security & Encryption
-    implementation("androidx.security:security-crypto:1.1.0-alpha06")
+    // Removed security-crypto alpha dependency for Audit Point 17.
+    // Now using direct Android Keystore implementation.
 
     // CameraX
     val cameraVersion = "1.3.1"

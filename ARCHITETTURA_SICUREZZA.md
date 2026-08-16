@@ -24,11 +24,12 @@ Questo documento fornisce una panoramica tecnica per i revisori della sicurezza.
 - **Verifica**: Supporto per la verifica manuale dell'identità (confronto fingerprint o QR Code) per prevenire attacchi Man-In-The-Middle (MITM).
 - **Conservazione**: Chiavi private salvate esclusivamente nel sistema protetto `EncryptedSharedPreferences` (Keystore hardware se disponibile).
 
-## 4. Resilienza Forense e Privacy
-- **RAM-Only Policy**: Nessun database di messaggi sul disco. I messaggi decifrati vivono solo nella memoria volatile e vengono distrutti alla chiusura dell'app.
-- **Wipe di Emergenza**: Autodistruzione totale dei dati (chiavi, contatti, salt) dopo 3 tentativi di password errati.
+## 4. Privacy e Gestione Dati Locali
+- **Politica di Non-Persistenza Messaggi**: Nessun database di messaggi è presente sul disco. I messaggi decifrati vivono esclusivamente nella memoria volatile (Snapshots di stato) e vengono distrutti alla chiusura del processo dell'app.
+- **Eccezione Allegati**: Gli allegati (foto/file) possono essere salvati permanentemente nel dispositivo esclusivamente su azione esplicita dell'utente tramite il pulsante "Salva". In quel caso, i file vengono gestiti dal MediaStore di sistema e non sono più sotto il controllo di sicurezza dell'app.
+- **Cancellazione Dati (Wipe)**: Dopo 3 tentativi di password errati, l'app esegue la cancellazione dei propri dati sensibili (SharedPreferences, Master Key hardware, chiavi Tor). **Nota**: I file precedentemente esportati dall'utente (come i backup JSON o gli allegati salvati) non vengono rimossi da questa procedura.
 - **Screenshot Protection**: `FLAG_SECURE` attivo su tutte le schermate sensibili.
-- **Metadata Stripping**: Rimozione automatica dei metadati EXIF dalle immagini caricate.
+- **Metadata Stripping**: Rimozione automatica dei metadati EXIF dalle immagini prima dell'invio.
 
 ## 5. Backup
 - **Formato**: JSON cifrato con AES-256 (chiave derivata da Mnemonic Seed 12 parole + Salt).

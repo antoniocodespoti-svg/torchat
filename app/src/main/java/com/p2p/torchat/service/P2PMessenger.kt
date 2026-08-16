@@ -41,7 +41,7 @@ class P2PMessenger(
             val result =
                 withContext(Dispatchers.IO) {
                     try {
-                        Log.d(TAG, "Attempt ${attempt + 1}: Sending to $cleanOnion via Tor Proxy")
+                        Log.d(TAG, "Attempt ${attempt + 1}: Connecting via Tor Proxy")
                         val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress(socksProxyHost, socksProxyPort))
                         val socket = Socket(proxy)
                         val targetPort = 80
@@ -50,16 +50,17 @@ class P2PMessenger(
                         socket.connect(socketAddress, timeoutMs)
                         val writer = PrintWriter(socket.getOutputStream(), true)
 
-                        val paddedPayload = addPadding(payload)
-                        val jsonPayload = gson.toJson(paddedPayload)
+                        // Audit Point 12: Mathematically precise padding
+                        val rawJson = gson.toJson(payload)
+                        val paddedJson = addPrecisePadding(rawJson)
 
-                        writer.println(jsonPayload)
+                        writer.println(paddedJson)
                         socket.close()
-                        Log.d(TAG, "Payload sent successfully to $cleanOnion (Size: ${jsonPayload.length} bytes)")
+                        Log.d(TAG, "Payload transmission successful")
                         Result.success(true)
                     } catch (e: Exception) {
                         lastError = e
-                        Log.w(TAG, "Attempt ${attempt + 1} failed for $cleanOnion: ${e.message}")
+                        Log.w(TAG, "Attempt ${attempt + 1} failed")
                         Result.failure(e)
                     }
                 }
@@ -72,37 +73,14 @@ class P2PMessenger(
         return Result.failure(lastError ?: Exception("Unknown error during Tor transmission"))
     }
 
-    private fun addPadding(payload: NetworkPayload): NetworkPayload {
-        // Advanced Multi-Bucket Padding (obfuscates file/image sizes)
-        val buckets =
-            listOf(
-                4096, // 4KB (Standard Text)
-                131072, // 128KB (Large Text / Small Image)
-                524288, // 512KB (Compressed Image)
-                1048576, // 1MB (High-res Image)
-                2097152, // 2MB (File)
-                5242880, // 5MB (Max support)
-            )
+    private fun addPrecisePadding(json: String): String {
+        val buckets = listOf(4096, 131072, 524288, 1048576, 2097152, 5242880)
+        val targetSize = buckets.find { it > json.length } ?: json.length
+        if (json.length >= targetSize) return json
 
-        val currentJson = gson.toJson(payload)
-        val currentSize = currentJson.length
-
-        // Find the next available bucket
-        val targetSize = buckets.find { it > currentSize } ?: currentSize
-
-        return if (currentSize < targetSize) {
-            val paddingNeeded = targetSize - currentSize - 15 // Overhead for "padding":""
-            if (paddingNeeded > 0) {
-                // Generate padding string efficiently
-                val paddingContent = StringBuilder(paddingNeeded)
-                repeat(paddingNeeded) { paddingContent.append('x') }
-                payload.copy(padding = paddingContent.toString())
-            } else {
-                payload
-            }
-        } else {
-            payload
-        }
+        // Append spaces to the end of JSON. GSON ignores trailing whitespace during parsing.
+        val paddingNeeded = targetSize - json.length
+        return json + " ".repeat(paddingNeeded)
     }
 
     private fun sanitizeOnion(onion: String): String {

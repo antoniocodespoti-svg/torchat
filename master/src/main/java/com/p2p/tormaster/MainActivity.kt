@@ -53,6 +53,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.BufferedReader
+import java.io.InputStreamReader
 import java.security.SecureRandom
 import java.util.Base64
 import java.util.concurrent.Executors
@@ -83,12 +85,16 @@ class MainActivity : ComponentActivity() {
     private val cameraPermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { if (it) currentScreen = MasterScreen.Scanner }
     private val exportBackupLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { u -> u?.let { handleExport(it) } }
     private val importBackupLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { u -> u?.let { handleImport(it) } }
+    private val orbotLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { res -> if (res.resultCode == RESULT_OK) res.data?.getStringExtra("onion_address")?.let { torManager.setTorRunning(it) } }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         walletManager = MasterWalletManager(this)
         loadPreferences()
-        torManager.startTorService()
+        if (torManager.isOrbotInstalled()) {
+            val s = getSharedPreferences("master_prefs", Context.MODE_PRIVATE).getString("saved_onion_address", null)
+            if (s != null) torManager.setTorRunning(s) else orbotLauncher.launch(torManager.getOrbotRequestIntent())
+        }
         setContent { MaterialTheme(colorScheme = darkColorScheme(primary = Color(0xFF00FFFF))) { AppContent() } }
     }
 
@@ -114,12 +120,12 @@ class MainActivity : ComponentActivity() {
 
     private fun handleAuth(p: String, c: String): Boolean {
         if (masterPasswordHash == null) { if (p.isNotEmpty() && p == c) { val h = E2EManager.hashPassword(p); getSharedPreferences("master_prefs", Context.MODE_PRIVATE).edit().putString("master_password_hash", h).apply(); masterPasswordHash = h; currentScreen = MasterScreen.SeedBackup; return true } }
-        else if (E2EManager.hashPassword(p) == masterPasswordHash) { failedAttempts = 0; getSharedPreferences("master_prefs", Context.MODE_PRIVATE).edit().putInt("failed_attempts", 0).apply(); currentScreen = MasterScreen.Wallet; return true }
+        else if (E2EManager.verifyPassword(p, masterPasswordHash ?: "")) { failedAttempts = 0; getSharedPreferences("master_prefs", Context.MODE_PRIVATE).edit().putInt("failed_attempts", 0).apply(); currentScreen = MasterScreen.Wallet; return true }
         else { failedAttempts++; getSharedPreferences("master_prefs", Context.MODE_PRIVATE).edit().putInt("failed_attempts", failedAttempts).apply(); if (failedAttempts >= 3) performWipe() else Toast.makeText(this, "No (${3 - failedAttempts})", Toast.LENGTH_SHORT).show() }
         return false
     }
 
-    private fun handleExport(u: Uri) { try { getSharedPreferences("master_prefs", Context.MODE_PRIVATE).edit().putString("last_backup_uri", u.toString()).apply(); val enc = MasterBackupManager(this).createEncryptedBackupJson(currentSeed, getOrCreateSalt(), walletManager.getBalance()); contentResolver.openOutputStream(u)?.use { it.write(enc.toByteArray()) }; Toast.makeText(this, "OK", Toast.LENGTH_SHORT).show() } catch (e: Exception) { } }
+    private fun handleExport(u: Uri) { try { contentResolver.takePersistableUriPermission(u, Intent.FLAG_GRANT_WRITE_URI_PERMISSION or Intent.FLAG_GRANT_READ_URI_PERMISSION); getSharedPreferences("master_prefs", Context.MODE_PRIVATE).edit().putString("last_backup_uri", u.toString()).apply(); contentResolver.openOutputStream(u)?.use { it.write(MasterBackupManager(this).createEncryptedBackupJson(currentSeed, getOrCreateSalt(), walletManager.getBalance()).toByteArray()) }; Toast.makeText(this, "OK", Toast.LENGTH_SHORT).show() } catch (e: Exception) { } }
     private fun handleImport(u: Uri) { try { val pkg = contentResolver.openInputStream(u)?.bufferedReader()?.use { it.readText() }; if (pkg != null && MasterBackupManager(this).restoreFromEncryptedBackup(pkg, currentSeed) != null) { finish(); startActivity(intent) } } catch (e: Exception) { } }
 
     private fun loadPreferences() {
@@ -128,11 +134,18 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun getOrCreateSalt(): ByteArray {
-        val a = MasterKeys.getOrCreate(MasterKeys.AES256_GCM_SPEC); val p = EncryptedSharedPreferences.create("secure_prefs", a, this, EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV, EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM); val s = p.getString("install_salt", null)
-        return if (s != null) Base64.getDecoder().decode(s) else { val salt = ByteArray(16).apply { SecureRandom().nextBytes(this) }; p.edit().putString("install_salt", Base64.getEncoder().encodeToString(salt)).apply(); salt }
+        val p = getSharedPreferences("master_secure_prefs", Context.MODE_PRIVATE); val sEnc = p.getString("install_salt_enc", null)
+        return if (sEnc != null) { try { Base64.getDecoder().decode(E2EManager.decryptWithHardwareKey(sEnc)) } catch (e: Exception) { generateAndSaveSalt(p) } } else generateAndSaveSalt(p)
     }
 
-    private fun performWipe() { getSharedPreferences("master_prefs", Context.MODE_PRIVATE).edit().clear().apply(); getSharedPreferences("master_wallet_prefs", Context.MODE_PRIVATE).edit().clear().apply(); try { val a = MasterKeys.getOrCreate(MasterKeys.AES256_GCM_SPEC); EncryptedSharedPreferences.create("secure_prefs", a, this, EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV, EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM).edit().clear().apply() } catch (e: Exception) { }; finish() }
+    private fun generateAndSaveSalt(p: android.content.SharedPreferences): ByteArray {
+        val s = ByteArray(16).apply { SecureRandom().nextBytes(this) }
+        val enc = E2EManager.encryptWithHardwareKey(Base64.getEncoder().encodeToString(s))
+        p.edit().putString("install_salt_enc", enc).apply()
+        return s
+    }
+
+    private fun performWipe() { getSharedPreferences("master_prefs", Context.MODE_PRIVATE).edit().clear().apply(); getSharedPreferences("master_wallet_prefs", Context.MODE_PRIVATE).edit().clear().apply(); try { E2EManager.deleteMasterKey() } catch (e: Exception) { }; finish() }
 
     @OptIn(ExperimentalMaterial3Api::class) @Composable private fun MasterDrawer(ds: DrawerState, sc: CoroutineScope) { ModalDrawerSheet { Spacer(Modifier.height(12.dp)); Text("MASTER WALLET", Modifier.padding(16.dp), Color.Cyan, fontWeight = FontWeight.Bold); NavigationDrawerItem({ Text("WALLET") }, currentScreen == MasterScreen.Wallet, { currentScreen = MasterScreen.Wallet; sc.launch { ds.close() } }, icon = { Icon(Icons.Default.AccountBalanceWallet, null) }); NavigationDrawerItem({ Text("GENERA") }, currentScreen == MasterScreen.Generator, { currentScreen = MasterScreen.Generator; sc.launch { ds.close() } }, icon = { Icon(Icons.Default.VpnKey, null) }); NavigationDrawerItem({ Text("BACKUP") }, currentScreen == MasterScreen.SeedBackup, { currentScreen = MasterScreen.SeedBackup; sc.launch { ds.close() } }, icon = { Icon(Icons.Default.Backup, null) }); Spacer(Modifier.weight(1f)); TextButton({ performWipe() }, Modifier.fillMaxWidth()) { Text("RESET", color = Color.Red) } } }
     @OptIn(ExperimentalMaterial3Api::class) @Composable private fun MasterTopBar(ds: DrawerState, sc: CoroutineScope) { CenterAlignedTopAppBar(title = { Text("TOR MASTER") }, navigationIcon = { IconButton({ sc.launch { ds.open() } }) { Icon(Icons.Default.Menu, null) } }) }

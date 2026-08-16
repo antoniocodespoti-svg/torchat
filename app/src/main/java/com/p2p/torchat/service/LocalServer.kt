@@ -10,6 +10,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.BufferedReader
 import java.io.InputStreamReader
+import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 
@@ -19,6 +20,7 @@ class LocalServer(
 ) {
     companion object {
         private const val TAG = "LocalServer"
+        private const val LOOPBACK_ADDRESS = "127.0.0.1"
     }
 
     private var serverSocket: ServerSocket? = null
@@ -31,9 +33,14 @@ class LocalServer(
         serverJob =
             CoroutineScope(Dispatchers.IO).launch {
                 try {
-                    Log.d(TAG, "Starting LocalServer on port $port...")
-                    serverSocket = ServerSocket(port)
-                    Log.d(TAG, "LocalServer listening for connections...")
+                    Log.d(TAG, "Starting LocalServer on $LOOPBACK_ADDRESS:$port...")
+
+                    // CRITICAL SECURITY FIX: Explicitly bind only to loopback address (127.0.0.1)
+                    // This prevents other devices on the same local network (Wi-Fi) from connecting.
+                    serverSocket = ServerSocket()
+                    serverSocket?.bind(InetSocketAddress(LOOPBACK_ADDRESS, port))
+
+                    Log.d(TAG, "LocalServer listening for connections on 127.0.0.1 only...")
                     while (isActive) {
                         val clientSocket = serverSocket?.accept() ?: break
                         Log.d(TAG, "New incoming connection from ${clientSocket.inetAddress}")

@@ -1,13 +1,13 @@
 package com.p2p.supermaster.crypto
 
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
 import com.lambdapioneer.argon2kt.Argon2Kt
 import com.lambdapioneer.argon2kt.Argon2Mode
 import java.nio.charset.StandardCharsets
 import java.security.*
-import java.security.spec.X509EncodedKeySpec
 import java.util.Base64
 import javax.crypto.Cipher
-import javax.crypto.KeyAgreement
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
@@ -17,197 +17,99 @@ class E2EManager {
     companion object {
         private const val AES_GCM_TAG_LENGTH = 128
         private const val IV_LENGTH = 12
-
-        /**
-         * Generates a random 256-bit AES SecretKey
-         */
-        fun generateSecretKey(): SecretKey {
-            val keyGen = KeyGenerator.getInstance("AES")
-            keyGen.init(256)
-            return keyGen.generateKey()
-        }
-
-        /**
-         * Generates an ECDH KeyPair (secp256r1 / P-256)
-         */
-        fun generateECDHKeyPair(): KeyPair {
-            val keyPairGen = KeyPairGenerator.getInstance("EC")
-            keyPairGen.initialize(256)
-            return keyPairGen.generateKeyPair()
-        }
-
-        /**
-         * Derives a shared AES key using ECDH
-         */
-        fun getSharedSecret(
-            privateKey: PrivateKey,
-            publicKey: PublicKey,
-        ): SecretKeySpec {
-            val keyAgreement = KeyAgreement.getInstance("ECDH")
-            keyAgreement.init(privateKey)
-            keyAgreement.doPhase(publicKey, true)
-            val sharedSecret = keyAgreement.generateSecret()
-
-            // Hash the shared secret to get a fixed 256-bit key
-            val digest = MessageDigest.getInstance("SHA-256")
-            val keyBytes = digest.digest(sharedSecret)
-            return SecretKeySpec(keyBytes, "AES")
-        }
-
-        /**
-         * Converts a Base64 string to a PublicKey
-         */
-        fun stringToPublicKey(base64Key: String): PublicKey {
-            val keyBytes = Base64.getDecoder().decode(base64Key)
-            val keyFactory = KeyFactory.getInstance("EC")
-            return keyFactory.generatePublic(X509EncodedKeySpec(keyBytes))
-        }
-
-        /**
-         * Converts a PublicKey to a Base64 string
-         */
-        fun publicKeyToString(publicKey: PublicKey): String {
-            return Base64.getEncoder().encodeToString(publicKey.encoded)
-        }
-
-        /**
-         * Derives a deterministic 256-bit secret key from a shared secret string
-         */
-        fun deriveKeyFromSecret(sharedSecret: String): SecretKeySpec {
-            val digest = MessageDigest.getInstance("SHA-256")
-            val keyBytes = digest.digest(sharedSecret.toByteArray(StandardCharsets.UTF_8))
-            return SecretKeySpec(keyBytes, "AES")
-        }
-
-        // Argon2id Parameters
-        private const val ARGON2_ITERATIONS = 2
-        private const val ARGON2_MEMORY = 65536 // 64 MB
-        private const val ARGON2_PARALLELISM = 1
-        private const val ARGON2_HASH_LENGTH = 32
-
+        private const val MASTER_KEY_ALIAS = "SuperHardwareKey"
+        private const val ANDROID_KEYSTORE = "AndroidKeyStore"
         private val argon2 = Argon2Kt()
 
-        /**
-         * Derives a 256-bit key from a secret string using Argon2id
-         */
-        fun deriveKeyArgon2id(
-            secret: String,
-            salt: ByteArray,
-        ): SecretKeySpec {
-            val result =
-                argon2.hash(
-                    mode = Argon2Mode.ARGON2_ID,
-                    password = secret.toByteArray(StandardCharsets.UTF_8),
-                    salt = salt,
-                    tCostInIterations = ARGON2_ITERATIONS,
-                    mCostInKibibyte = ARGON2_MEMORY,
-                    parallelism = ARGON2_PARALLELISM,
-                    hashLengthInBytes = ARGON2_HASH_LENGTH,
-                )
-            val hashBytes = result.rawHashAsByteArray()
-            return SecretKeySpec(hashBytes, "AES")
+        fun encryptWithHardwareKey(plainText: String): String {
+            val secretKey = getOrCreateMasterKey()
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.ENCRYPT_MODE, secretKey)
+            val iv = cipher.iv
+            val enc = cipher.doFinal(plainText.toByteArray(StandardCharsets.UTF_8))
+            val combined = ByteArray(iv.size + enc.size)
+            System.arraycopy(iv, 0, combined, 0, iv.size)
+            System.arraycopy(enc, 0, combined, iv.size, enc.size)
+            return Base64.getEncoder().encodeToString(combined)
         }
 
-        /**
-         * Hashes a password for secure storage using Argon2id
-         */
-        fun hashPassword(password: String): String {
-            val salt = ByteArray(16)
-            SecureRandom().nextBytes(salt)
-
-            val result =
-                argon2.hash(
-                    mode = Argon2Mode.ARGON2_ID,
-                    password = password.toByteArray(StandardCharsets.UTF_8),
-                    salt = salt,
-                    tCostInIterations = ARGON2_ITERATIONS,
-                    mCostInKibibyte = ARGON2_MEMORY,
-                    parallelism = ARGON2_PARALLELISM,
-                    hashLengthInBytes = ARGON2_HASH_LENGTH,
-                )
-
-            return result.encodedOutputAsString()
+        fun decryptWithHardwareKey(encB64: String): String {
+            val comb = Base64.getDecoder().decode(encB64)
+            val iv = comb.sliceArray(0 until 12)
+            val enc = comb.sliceArray(12 until comb.size)
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, getOrCreateMasterKey(), GCMParameterSpec(AES_GCM_TAG_LENGTH, iv))
+            return String(cipher.doFinal(enc), StandardCharsets.UTF_8)
         }
 
-        /**
-         * Verifies a password against an Argon2id encoded hash
-         */
-        fun verifyPassword(
-            password: String,
-            encodedHash: String,
-        ): Boolean {
-            // Handle old SHA-256 hashes for migration
-            if (!encodedHash.startsWith("$")) {
-                val oldHash = hashPasswordOld(password)
-                return oldHash == encodedHash
+        private fun getOrCreateMasterKey(): SecretKey {
+            val ks = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+            if (!ks.containsAlias(MASTER_KEY_ALIAS)) {
+                val kg = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
+                kg.init(
+                    KeyGenParameterSpec.Builder(
+                        MASTER_KEY_ALIAS,
+                        KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+                    ).setBlockModes(
+                        KeyProperties.BLOCK_MODE_GCM,
+                    ).setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE).setKeySize(256).build(),
+                )
+                return kg.generateKey()
             }
+            return (ks.getEntry(MASTER_KEY_ALIAS, null) as KeyStore.SecretKeyEntry).secretKey
+        }
 
+        fun deleteMasterKey() {
+            KeyStore.getInstance(ANDROID_KEYSTORE).apply {
+                load(null)
+                deleteEntry(MASTER_KEY_ALIAS)
+            }
+        }
+
+        fun hashPassword(p: String): String {
+            val s = ByteArray(16).apply { SecureRandom().nextBytes(this) }
+            return argon2.hash(Argon2Mode.ARGON2_ID, p.toByteArray(), s, 2, 65536, 1, 32).encodedOutputAsString()
+        }
+
+        fun verifyPassword(
+            p: String,
+            h: String,
+        ): Boolean {
             return try {
-                argon2.verify(
-                    mode = Argon2Mode.ARGON2_ID,
-                    encoded = encodedHash,
-                    password = password.toByteArray(StandardCharsets.UTF_8),
-                )
+                argon2.verify(Argon2Mode.ARGON2_ID, h, p.toByteArray())
             } catch (e: Exception) {
                 false
             }
         }
 
-        private fun hashPasswordOld(password: String): String {
-            val digest = MessageDigest.getInstance("SHA-256")
-            val hashBytes = digest.digest(password.toByteArray(StandardCharsets.UTF_8))
-            return Base64.getEncoder().encodeToString(hashBytes)
-        }
-
-        /**
-         * Encrypts plaintext using AES-256-GCM
-         */
         fun encrypt(
             plainText: String,
             secretKey: SecretKey,
         ): String {
-            val iv = ByteArray(IV_LENGTH)
-            SecureRandom().nextBytes(iv)
-
+            val iv = ByteArray(IV_LENGTH).apply { SecureRandom().nextBytes(this) }
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            val parameterSpec = GCMParameterSpec(AES_GCM_TAG_LENGTH, iv)
-            cipher.init(Cipher.ENCRYPT_MODE, secretKey, parameterSpec)
-
-            val cipherTextBytes = cipher.doFinal(plainText.toByteArray(StandardCharsets.UTF_8))
-
-            // Combine IV + CipherText
-            val combined = ByteArray(iv.size + cipherTextBytes.size)
+            cipher.init(Cipher.ENCRYPT_MODE, secretKey, GCMParameterSpec(AES_GCM_TAG_LENGTH, iv))
+            val enc = cipher.doFinal(plainText.toByteArray(StandardCharsets.UTF_8))
+            val combined = ByteArray(iv.size + enc.size)
             System.arraycopy(iv, 0, combined, 0, iv.size)
-            System.arraycopy(cipherTextBytes, 0, combined, iv.size, cipherTextBytes.size)
-
+            System.arraycopy(enc, 0, combined, iv.size, enc.size)
             return Base64.getEncoder().encodeToString(combined)
         }
 
-        /**
-         * Decrypts AES-256-GCM base64 encoded payload
-         */
         fun decrypt(
-            encryptedBase64: String,
+            encB64: String,
             secretKey: SecretKey,
         ): String {
-            val combined = Base64.getDecoder().decode(encryptedBase64)
-            if (combined.size < IV_LENGTH) {
-                throw IllegalArgumentException("Invalid encrypted payload size")
-            }
-
-            val iv = ByteArray(IV_LENGTH)
-            System.arraycopy(combined, 0, iv, 0, IV_LENGTH)
-
-            val cipherTextSize = combined.size - IV_LENGTH
-            val cipherTextBytes = ByteArray(cipherTextSize)
-            System.arraycopy(combined, IV_LENGTH, cipherTextBytes, 0, cipherTextSize)
-
+            val comb = Base64.getDecoder().decode(encB64)
+            val iv = comb.sliceArray(0 until IV_LENGTH)
+            val enc = comb.sliceArray(IV_LENGTH until comb.size)
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            val parameterSpec = GCMParameterSpec(AES_GCM_TAG_LENGTH, iv)
-            cipher.init(Cipher.DECRYPT_MODE, secretKey, parameterSpec)
+            cipher.init(Cipher.DECRYPT_MODE, secretKey, GCMParameterSpec(AES_GCM_TAG_LENGTH, iv))
+            return String(cipher.doFinal(enc), StandardCharsets.UTF_8)
+        }
 
-            val decryptedBytes = cipher.doFinal(cipherTextBytes)
-            return String(decryptedBytes, StandardCharsets.UTF_8)
+        fun deriveKeyFromSecret(sharedSecret: String): SecretKeySpec {
+            return SecretKeySpec(HKDF.deriveKey(sharedSecret.toByteArray(), null, "Internal".toByteArray(), 32), "AES")
         }
     }
 }

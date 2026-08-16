@@ -60,6 +60,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.BufferedReader
+import java.io.InputStreamReader
 import java.security.SecureRandom
 import java.util.Base64
 import java.util.concurrent.Executors
@@ -80,10 +82,15 @@ class MainActivity : ComponentActivity() {
     private val cameraPermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { if (it) currentScreen = SuperScreen.Scanner }
     private val exportBackupLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { u -> u?.let { handleExport(it) } }
     private val importBackupLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { u -> u?.let { handleImport(it) } }
+    private val orbotLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { res -> if (res.resultCode == RESULT_OK) res.data?.getStringExtra("onion_address")?.let { torManager.setTorRunning(it) } }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         loadPreferences()
+        if (torManager.isOrbotInstalled()) {
+            val s = getSharedPreferences("supermaster_prefs", Context.MODE_PRIVATE).getString("saved_onion_address", null)
+            if (s != null) torManager.setTorRunning(s) else orbotLauncher.launch(torManager.getOrbotRequestIntent())
+        }
         torManager.startTorService()
         setContent { MaterialTheme(colorScheme = darkColorScheme(primary = Color.Yellow)) { AppContent() } }
     }
@@ -109,7 +116,7 @@ class MainActivity : ComponentActivity() {
 
     private fun handleAuth(p: String, c: String) {
         if (masterPasswordHash == null) { if (p.isNotEmpty() && p == c) { val h = E2EManager.hashPassword(p); getSharedPreferences("supermaster_prefs", Context.MODE_PRIVATE).edit().putString("super_password_hash", h).apply(); masterPasswordHash = h; currentScreen = SuperScreen.SeedBackup } }
-        else if (E2EManager.hashPassword(p) == masterPasswordHash) { failedAttempts = 0; getSharedPreferences("supermaster_prefs", Context.MODE_PRIVATE).edit().putInt("failed_attempts", 0).apply(); currentScreen = SuperScreen.Directory }
+        else if (E2EManager.verifyPassword(p, masterPasswordHash ?: "")) { failedAttempts = 0; getSharedPreferences("supermaster_prefs", Context.MODE_PRIVATE).edit().putInt("failed_attempts", 0).apply(); currentScreen = SuperScreen.Directory }
         else { failedAttempts++; getSharedPreferences("supermaster_prefs", Context.MODE_PRIVATE).edit().putInt("failed_attempts", failedAttempts).apply(); if (failedAttempts >= 3) performWipe() else Toast.makeText(this, "No (${3 - failedAttempts})", Toast.LENGTH_SHORT).show() }
     }
 
@@ -122,11 +129,18 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun getOrCreateSalt(): ByteArray {
-        val a = MasterKeys.getOrCreate(MasterKeys.AES256_GCM_SPEC); val p = EncryptedSharedPreferences.create("secure_prefs", a, this, EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV, EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM); val s = p.getString("install_salt", null)
-        return if (s != null) Base64.getDecoder().decode(s) else { val salt = ByteArray(16).apply { SecureRandom().nextBytes(this) }; p.edit().putString("install_salt", Base64.getEncoder().encodeToString(salt)).apply(); salt }
+        val p = getSharedPreferences("super_secure_prefs", Context.MODE_PRIVATE); val sEnc = p.getString("install_salt_enc", null)
+        return if (sEnc != null) { try { Base64.getDecoder().decode(E2EManager.decryptWithHardwareKey(sEnc)) } catch (e: Exception) { generateAndSaveSalt(p) } } else generateAndSaveSalt(p)
     }
 
-    private fun performWipe() { getSharedPreferences("supermaster_prefs", Context.MODE_PRIVATE).edit().clear().apply(); try { val a = MasterKeys.getOrCreate(MasterKeys.AES256_GCM_SPEC); EncryptedSharedPreferences.create("secure_prefs", a, this, EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV, EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM).edit().clear().apply() } catch (e: Exception) { }; finish() }
+    private fun generateAndSaveSalt(p: android.content.SharedPreferences): ByteArray {
+        val s = ByteArray(16).apply { SecureRandom().nextBytes(this) }
+        val enc = E2EManager.encryptWithHardwareKey(Base64.getEncoder().encodeToString(s))
+        p.edit().putString("install_salt_enc", enc).apply()
+        return s
+    }
+
+    private fun performWipe() { getSharedPreferences("supermaster_prefs", Context.MODE_PRIVATE).edit().clear().apply(); try { E2EManager.deleteMasterKey() } catch (e: Exception) { }; finish() }
 
     @OptIn(ExperimentalMaterial3Api::class) @Composable private fun SuperDrawer(ds: DrawerState, sc: CoroutineScope) { ModalDrawerSheet { Spacer(Modifier.height(12.dp)); Text("SUPER MASTER CORE", Modifier.padding(16.dp), Color.Yellow, fontWeight = FontWeight.Bold); NavigationDrawerItem({ Text("HOME") }, currentScreen == SuperScreen.Home, { currentScreen = SuperScreen.Home; sc.launch { ds.close() } }, icon = { Icon(Icons.Default.Search, null) }); NavigationDrawerItem({ Text("RUBRICA") }, currentScreen == SuperScreen.Directory, { currentScreen = SuperScreen.Directory; sc.launch { ds.close() } }, icon = { Icon(Icons.Default.Group, null) }); NavigationDrawerItem({ Text("BACKUP") }, currentScreen == SuperScreen.SeedBackup, { currentScreen = SuperScreen.SeedBackup; sc.launch { ds.close() } }, icon = { Icon(Icons.Default.Backup, null) }); Spacer(Modifier.weight(1f)); TextButton({ performWipe() }, Modifier.fillMaxWidth()) { Text("RESET", color = Color.Red) } } }
     @OptIn(ExperimentalMaterial3Api::class) @Composable private fun SuperTopBar(ds: DrawerState, sc: CoroutineScope) { CenterAlignedTopAppBar(title = { Text("SUPER MASTER", color = Color.Yellow) }, navigationIcon = { IconButton({ sc.launch { ds.open() } }) { Icon(Icons.Default.Menu, null, tint = Color.Yellow) } }, colors = TopAppBarDefaults.centerAlignedTopAppBarColors(containerColor = Color.Black)) }
@@ -155,7 +169,7 @@ class MainActivity : ComponentActivity() {
         if (show) AlertDialog({ show = false }, { Button({ if (nN.isNotBlank() && nO.isNotBlank()) { addCollaborator(nN, nO); show = false } }) { Text("OK") } }, title = { Text("Add Master") }, text = { Column { OutlinedTextField(nN, { nN = it }, label = { Text("User") }); OutlinedTextField(nO, { nO = it }, label = { Text("Onion") }, trailingIcon = { IconButton({ isScanningForDirectory = true; cameraPermissionLauncher.launch(Manifest.permission.CAMERA) }) { Icon(Icons.Default.QrCodeScanner, null) } }) } })
     }
 
-    @Composable fun MasterItem(m: MasterCollaborator) { Card({ currentScreen = SuperScreen.Details(m.onionAddress) }, Modifier.fillMaxWidth(), border = androidx.compose.foundation.BorderStroke(1.dp, Color.Yellow.copy(0.3f))) { Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) { Icon(Icons.Default.Person, null, tint = Color.Yellow); Spacer(Modifier.width(16.dp)); Column { Text(m.username, fontWeight = FontWeight.Bold); Text(m.onionAddress.take(20), color = Color.Gray, fontSize = 10.sp) } } } }
+    @Composable fun MasterItem(m: MasterCollaborator) { Card({ currentScreen = SuperScreen.Details(m.onionAddress) }, Modifier.fillMaxWidth(), border = androidx.compose.foundation.BorderStroke(1.dp, Color.Yellow.copy(alpha = 0.3f))) { Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) { Icon(Icons.Default.Person, null, tint = Color.Yellow); Spacer(Modifier.width(16.dp)); Column { Text(m.username, fontWeight = FontWeight.Bold); Text(m.onionAddress.take(20), color = Color.Gray, fontSize = 10.sp) } } } }
     @Composable fun SuperHomeScreen() {
         var sID by remember { mutableStateOf(selectedMasterId) }; val f = collaborators.find { it.onionAddress == sID.trim() }
         LaunchedEffect(selectedMasterId) { sID = selectedMasterId }
@@ -178,7 +192,7 @@ class MainActivity : ComponentActivity() {
 
     @Composable fun RechargeDialog(onion: String, onD: () -> Unit, onG: (Int, String) -> Unit) {
         var d by remember { mutableIntStateOf(30) }; var code by remember { mutableStateOf<String?>(null) }
-        AlertDialog(onD, { Button({ if (code == null) CoroutineScope(Dispatchers.IO).launch { val nt = timeFetcher.fetchTimeViaTor() ?: System.currentTimeMillis(); val c = totpManager.generateMasterCode(onion, nt, d); withContext(Dispatchers.Main) { code = c; onG(d, c) } } else onD() }) { Text(if (code == null) "GENERA" else "CHIUDI") } }, title = { Text("RICARICA") }, text = { if (code == null) Row(Modifier.fillMaxWidth(), Arrangement.SpaceEvenly, Alignment.CenterVertically) { IconButton({ d -= 30 }) { Icon(Icons.Default.Remove, null) }; Text("$d GG"); IconButton({ d += 30 }) { Icon(Icons.Default.Add, null) } } else Text(code!!, style = MaterialTheme.typography.displayMedium, color = Color.Yellow) })
+        AlertDialog(onD, { Button({ if (code == null) CoroutineScope(Dispatchers.IO).launch { val nt = timeFetcher.fetchTimeViaTor() ?: System.currentTimeMillis(); val c = totpManager.generateMasterCode(onion, nt, d); withContext(Dispatchers.Main) { code = c; onG(d, c) } } else onD() }) { Text(if (code == null) "GENERA" else "CHIUDI") } }, title = { Text("RICARICA") }, text = { if (code == null) Row(Modifier.fillMaxWidth(), Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) { IconButton({ d -= 30 }) { Icon(Icons.Default.Remove, null) }; Text("$d GG"); IconButton({ d += 30 }) { Icon(Icons.Default.Add, null) } } else Text(code!!, style = MaterialTheme.typography.displayMedium, color = Color.Yellow) })
     }
 
     @Composable fun SuperSeedScreen() {
@@ -203,10 +217,6 @@ class MainActivity : ComponentActivity() {
     private fun saveAutoBackupPreference(e: Boolean) { getSharedPreferences("supermaster_prefs", Context.MODE_PRIVATE).edit().putBoolean("is_auto_backup_enabled", e).apply() }
     override fun onStop() { super.onStop(); autoBackup() }
     private fun autoBackup() { if (isAutoBackupEnabled && currentSeed.isNotEmpty()) getSharedPreferences("supermaster_prefs", Context.MODE_PRIVATE).getString("last_backup_uri", null)?.let { try { contentResolver.openOutputStream(it.toUri())?.use { os -> os.write(backupManager.createEncryptedBackup(currentSeed, getOrCreateSalt(), collaborators.toList(), masterPasswordHash).toByteArray()) } } catch (e: Exception) { } } }
-    private fun getTotalRecharged(c: MasterCollaborator): Int = c.rechargeHistory.sumOf { it.days }
-    private fun getGlobalTotalRecharged(): Int = collaborators.sumOf { getTotalRecharged(it) }
-    private fun getMasterWeightPercentage(c: MasterCollaborator): Float { val g = getGlobalTotalRecharged(); return if (g == 0) 0f else (getTotalRecharged(c).toFloat() / g) * 100f }
-    private fun getLastYearMasterWeightPercentage(c: MasterCollaborator): Float { val oneY = System.currentTimeMillis() - (365L * 24 * 60 * 60 * 1000); val mY = c.rechargeHistory.filter { it.timestamp > oneY }.sumOf { it.days }; val gY = collaborators.sumOf { it.rechargeHistory.filter { h -> h.timestamp > oneY }.sumOf { h -> h.days } }; return if (gY == 0) 0f else (mY.toFloat() / gY) * 100f }
 }
 
 @androidx.annotation.OptIn(ExperimentalGetImage::class) @Composable fun ImperialScannerUI(onS: (String) -> Unit, onB: () -> Unit) { val ctx = LocalContext.current; val lo = LocalLifecycleOwner.current; val cpf = remember { ProcessCameraProvider.getInstance(ctx) }; var hs by remember { mutableStateOf(false) }; Box(Modifier.fillMaxSize()) { AndroidView({ c -> val pv = PreviewView(c); cpf.addListener({ val cp = cpf.get(); val ia = ImageAnalysis.Builder().build(); ia.setAnalyzer(Executors.newSingleThreadExecutor()) { ip -> val mi = ip.image; if (mi != null && !hs) { BarcodeScanning.getClient().process(InputImage.fromMediaImage(mi, ip.imageInfo.rotationDegrees)).addOnSuccessListener { for (b in it) b.rawValue?.let { if (!hs) { hs = true; onS(it) } } }.addOnCompleteListener { ip.close() } } else ip.close() }; try { cp.unbindAll(); cp.bindToLifecycle(lo, CameraSelector.DEFAULT_BACK_CAMERA, Preview.Builder().build().apply { setSurfaceProvider(pv.surfaceProvider) }, ia) } catch (e: Exception) {} }, ContextCompat.getMainExecutor(c)); pv }, Modifier.fillMaxSize()); IconButton(onB, Modifier.align(Alignment.TopStart).padding(16.dp)) { Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = Color.White) } } }
