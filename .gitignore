@@ -1,0 +1,30 @@
+# Gradle files
+.gradle/
+build/
+
+# Android Studio / IntelliJ files
+.idea/
+*.iml
+*.iws
+.DS_Store
+
+# Local configuration
+local.properties
+
+# Output files
+*.apk
+*.ap_
+*.dex
+*.class
+
+# Project specific exclusions (CRITICAL FOR PRIVACY)
+.artifacts/
+backup_restore_point/
+temp_source/
+
+# Log files
+*.log
+
+# OS generated files
+Thumbs.db
+desktop.ini

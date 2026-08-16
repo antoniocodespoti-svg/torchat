@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Stylized Hood -->
+    <path
+        android:pathData="M30,80 Q30,20 54,15 Q78,20 78,80"
+        android:strokeWidth="3"
+        android:strokeColor="#39FF14"
+        android:strokeLineCap="round"/>
+
+    <!-- Binary Code representation -->
+    <path
+        android:pathData="M48,40 h4 v1 h-4 z M56,40 h4 v1 h-4 z M48,45 h4 v1 h-4 z M56,45 h4 v1 h-4 z"
+        android:fillColor="#8039FF14"/>
+
+    <path
+        android:pathData="M48,55 h4 v1 h-4 z M56,55 h4 v1 h-4 z M48,60 h4 v1 h-4 z M56,60 h4 v1 h-4 z"
+        android:fillColor="#8000F3FF"/>
+
+    <!-- Circuit lines -->
+    <path
+        android:pathData="M54,42 v15 h10"
+        android:strokeWidth="1"
+        android:strokeColor="#00F3FF"/>
+
+    <!-- App Name Base -->
+    <path
+        android:pathData="M35,90 h38"
+        android:strokeWidth="0.5"
+        android:strokeColor="#39FF14"
+        android:strokeAlpha="0.5"/>
+
+</vector>
