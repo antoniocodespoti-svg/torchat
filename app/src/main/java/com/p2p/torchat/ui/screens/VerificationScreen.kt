@@ -35,15 +35,19 @@ fun VerificationScreen(
     onVerify: () -> Unit,
     onBack: () -> Unit,
 ) {
-    val fingerprint =
-        remember(peer.handshakePublicKey) {
-            try {
-                val pubKey = E2EManager.stringToPublicKey(peer.handshakePublicKey)
+    val keyToVerify = if (peer.identityPublicKey.isNotEmpty()) peer.identityPublicKey else peer.handshakePublicKey
+
+    val fingerprint = remember(keyToVerify) {
+        try {
+            if (keyToVerify.isEmpty()) "NESSUNA CHIAVE"
+            else {
+                val pubKey = E2EManager.stringToPublicKey(keyToVerify, "Ed25519")
                 E2EManager.getFingerprint(pubKey)
-            } catch (e: Exception) {
-                "ERRORE CHIAVE"
             }
+        } catch (e: Exception) {
+            "ERRORE CHIAVE"
         }
+    }
 
     Scaffold(
         topBar = {
@@ -58,8 +62,7 @@ fun VerificationScreen(
         },
     ) { padding ->
         Column(
-            modifier =
-                Modifier
+            modifier = Modifier
                     .fillMaxSize()
                     .padding(padding)
                     .background(Color.Black)
@@ -100,7 +103,6 @@ fun VerificationScreen(
 
             Spacer(modifier = Modifier.height(24.dp))
 
-            // Fingerprint Box
             Card(
                 colors = CardDefaults.cardColors(containerColor = Color(0xFF111111)),
                 border = androidx.compose.foundation.BorderStroke(1.dp, NeonCyan.copy(alpha = 0.3f)),
@@ -117,7 +119,6 @@ fun VerificationScreen(
 
             Spacer(modifier = Modifier.height(32.dp))
 
-            // QR Code
             val qrBitmap = remember(fingerprint) { generateQR(fingerprint, 400, 400) }
             qrBitmap?.let {
                 Card(
@@ -154,11 +155,7 @@ fun VerificationScreen(
     }
 }
 
-private fun generateQR(
-    text: String,
-    width: Int,
-    height: Int,
-): Bitmap? {
+private fun generateQR(text: String, width: Int, height: Int): Bitmap? {
     return try {
         val writer = QRCodeWriter()
         val bitMatrix = writer.encode(text, BarcodeFormat.QR_CODE, width, height)

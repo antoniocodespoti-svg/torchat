@@ -8,12 +8,16 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import java.io.BufferedReader
-import java.io.InputStreamReader
+import java.io.InputStream
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.util.concurrent.atomic.AtomicInteger
 
+/**
+ * Hardened LocalServer for Tor P2P communication.
+ * Implements DoS protection, input limits and concurrent connection management.
+ */
 class LocalServer(
     private val port: Int = 8080,
     private val onMessageReceived: (NetworkPayload) -> Unit,
@@ -21,65 +25,79 @@ class LocalServer(
     companion object {
         private const val TAG = "LocalServer"
         private const val LOOPBACK_ADDRESS = "127.0.0.1"
+        private const val MAX_PAYLOAD_SIZE = 10 * 1024 * 1024 // 10MB limit
+        private const val MAX_CONCURRENT_CONNECTIONS = 5
     }
 
     private var serverSocket: ServerSocket? = null
     private var serverJob: Job? = null
     private val gson = Gson()
+    private val activeConnections = AtomicInteger(0)
 
     fun startServer() {
         if (serverJob != null && serverJob!!.isActive) return
 
-        serverJob =
-            CoroutineScope(Dispatchers.IO).launch {
-                try {
-                    Log.d(TAG, "Starting LocalServer on $LOOPBACK_ADDRESS:$port...")
+        serverJob = CoroutineScope(Dispatchers.IO).launch {
+            try {
+                serverSocket = ServerSocket()
+                serverSocket?.reuseAddress = true
+                serverSocket?.bind(InetSocketAddress(LOOPBACK_ADDRESS, port))
 
-                    // CRITICAL SECURITY FIX: Explicitly bind only to loopback address (127.0.0.1)
-                    // This prevents other devices on the same local network (Wi-Fi) from connecting.
-                    serverSocket = ServerSocket()
-                    serverSocket?.bind(InetSocketAddress(LOOPBACK_ADDRESS, port))
-
-                    Log.d(TAG, "LocalServer listening for connections on 127.0.0.1 only...")
-                    while (isActive) {
-                        val clientSocket = serverSocket?.accept() ?: break
-                        Log.d(TAG, "New incoming connection from ${clientSocket.inetAddress}")
-                        handleClient(clientSocket)
+                while (isActive) {
+                    val clientSocket = serverSocket?.accept() ?: break
+                    if (activeConnections.get() >= MAX_CONCURRENT_CONNECTIONS) {
+                        clientSocket.close()
+                        continue
                     }
-                } catch (e: java.io.IOException) {
-                    Log.e(TAG, "Server error: ${e.message}")
+                    handleClient(clientSocket)
                 }
+            } catch (e: Exception) {
+                Log.e(TAG, "Server error: ${e.message}")
             }
+        }
     }
 
     private fun handleClient(socket: Socket) {
+        activeConnections.incrementAndGet()
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
-                val rawJson = reader.readLine()
-                if (!rawJson.isNullOrEmpty()) {
-                    Log.d(TAG, "Payload received: ${rawJson.take(100)}...")
-                    val payload = gson.fromJson(rawJson, NetworkPayload::class.java)
-                    onMessageReceived(payload)
+                socket.soTimeout = 30000 // 30s timeout for reading
+                val inputStream = socket.getInputStream()
+                val rawData = readWithLimit(inputStream, MAX_PAYLOAD_SIZE)
+
+                if (rawData.isNotEmpty()) {
+                    val json = String(rawData, Charsets.UTF_8).trim()
+                    if (json.startsWith("{") && json.endsWith("}")) {
+                        val payload = gson.fromJson(json, NetworkPayload::class.java)
+                        onMessageReceived(payload)
+                    }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Client handling error: ${e.message}")
+                // Fail silently to avoid leaking info in logs
             } finally {
-                try {
-                    socket.close()
-                } catch (e: Exception) {
-                    // Ignore close failure
-                }
+                activeConnections.decrementAndGet()
+                try { socket.close() } catch (e: Exception) {}
             }
         }
+    }
+
+    private fun readWithLimit(input: InputStream, limit: Int): ByteArray {
+        val buffer = ByteArray(8192)
+        val output = java.io.ByteArrayOutputStream()
+        var totalRead = 0
+        while (totalRead < limit) {
+            val read = input.read(buffer, 0, minOf(buffer.size, limit - totalRead))
+            if (read <= 0) break
+            output.write(buffer, 0, read)
+            totalRead += read
+        }
+        return output.toByteArray()
     }
 
     fun stopServer() {
         try {
             serverSocket?.close()
             serverJob?.cancel()
-        } catch (e: java.io.IOException) {
-            Log.e(TAG, "Error stopping server: ${e.message}")
-        }
+        } catch (e: Exception) {}
     }
 }

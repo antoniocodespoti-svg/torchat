@@ -22,8 +22,9 @@ data class AttachmentMetadata(
 data class Peer(
     val onionAddress: String,
     val alias: String,
-    /** Base64 ECDH Public Key */
-    val handshakePublicKey: String,
+    /** Base64 Ed25519 Identity Public Key */
+    val identityPublicKey: String = "",
+    val handshakePublicKey: String = "", // Legacy field for backward compat during migration
     val isVerified: Boolean = false,
     val lastSeenTimestamp: Long = System.currentTimeMillis(),
     val isOnline: Boolean = false,
@@ -33,7 +34,6 @@ data class Message(
     val id: String = UUID.randomUUID().toString(),
     val senderOnion: String,
     val recipientOnion: String,
-    /** This will hold Base64 for images/files */
     val content: String,
     val timestamp: Long = System.currentTimeMillis(),
     val isOutgoing: Boolean = false,
@@ -41,6 +41,7 @@ data class Message(
     val isError: Boolean = false,
     val type: PayloadType = PayloadType.CHAT_MESSAGE,
     val attachment: AttachmentMetadata? = null,
+    val sequenceNumber: Int = 0
 )
 
 data class NetworkPayload(
@@ -50,5 +51,7 @@ data class NetworkPayload(
     val payloadData: String,
     val timestamp: Long = System.currentTimeMillis(),
     val attachmentMetadata: AttachmentMetadata? = null,
+    val sequenceNumber: Int = 0,
+    val sessionId: String = "",
     val padding: String = "",
 )

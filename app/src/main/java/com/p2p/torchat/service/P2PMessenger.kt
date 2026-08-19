@@ -1,92 +1,67 @@
 package com.p2p.torchat.service
 
-import android.util.Log
 import com.google.gson.Gson
 import com.p2p.torchat.model.NetworkPayload
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.io.PrintWriter
+import java.io.OutputStreamWriter
 import java.net.InetSocketAddress
 import java.net.Proxy
 import java.net.Socket
 import kotlin.random.Random
 
+/**
+ * Hardened P2PMessenger for Tor delivery.
+ * Implements Jitter, Bucketed Padding, and automatic retries.
+ */
 class P2PMessenger(
     private val socksProxyHost: String = "127.0.0.1",
     private val socksProxyPort: Int = 9050,
 ) {
-    companion object {
-        private const val TAG = "P2PMessenger"
-    }
-
     private val gson = Gson()
 
-    /**
-     * Connects to recipient's .onion address via local Tor SOCKS5 Proxy and transmits the payload
-     * Includes automatic retry logic for transient network failures.
-     */
     suspend fun sendPayloadOverTor(
         recipientOnion: String,
         payload: NetworkPayload,
-        timeoutMs: Int = 45000,
+        timeoutMs: Int = 30000,
     ): Result<Boolean> {
         val cleanOnion = sanitizeOnion(recipientOnion)
-        var lastError: Exception? = null
 
-        // Timing Jitter: Random delay between 100ms and 1000ms to obfuscate send patterns
-        val jitter = Random.nextLong(100, 1000)
-        kotlinx.coroutines.delay(jitter)
+        // Anti-Traffic Analysis Jitter (Audit Point 9)
+        kotlinx.coroutines.delay(Random.nextLong(100, 800))
 
-        repeat(3) { attempt ->
-            val result =
-                withContext(Dispatchers.IO) {
-                    try {
-                        Log.d(TAG, "Attempt ${attempt + 1}: Connecting via Tor Proxy")
-                        val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress(socksProxyHost, socksProxyPort))
-                        val socket = Socket(proxy)
-                        val targetPort = 80
-                        val socketAddress = InetSocketAddress.createUnresolved(cleanOnion, targetPort)
+        repeat(2) { attempt ->
+            val result = withContext(Dispatchers.IO) {
+                try {
+                    val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress(socksProxyHost, socksProxyPort))
+                    val socket = Socket(proxy)
+                    socket.connect(InetSocketAddress.createUnresolved(cleanOnion, 80), timeoutMs)
 
-                        socket.connect(socketAddress, timeoutMs)
-                        val writer = PrintWriter(socket.getOutputStream(), true)
+                    val writer = OutputStreamWriter(socket.getOutputStream(), Charsets.UTF_8)
+                    val rawJson = gson.toJson(payload)
+                    val paddedJson = addBucketedPadding(rawJson)
 
-                        // Audit Point 12: Mathematically precise padding
-                        val rawJson = gson.toJson(payload)
-                        val paddedJson = addPrecisePadding(rawJson)
-
-                        writer.println(paddedJson)
-                        socket.close()
-                        Log.d(TAG, "Payload transmission successful")
-                        Result.success(true)
-                    } catch (e: Exception) {
-                        lastError = e
-                        Log.w(TAG, "Attempt ${attempt + 1} failed")
-                        Result.failure(e)
-                    }
+                    writer.write(paddedJson)
+                    writer.flush()
+                    socket.close()
+                    Result.success(true)
+                } catch (e: Exception) {
+                    Result.failure(e)
                 }
+            }
             if (result.isSuccess) return Result.success(true)
-
-            // Wait before retry
-            if (attempt < 2) kotlinx.coroutines.delay(2000)
+            if (attempt < 1) kotlinx.coroutines.delay(2000)
         }
-
-        return Result.failure(lastError ?: Exception("Unknown error during Tor transmission"))
+        return Result.failure(Exception("Transmission failed after retries"))
     }
 
-    private fun addPrecisePadding(json: String): String {
-        val buckets = listOf(4096, 131072, 524288, 1048576, 2097152, 5242880)
+    private fun addBucketedPadding(json: String): String {
+        // Standardized sizes to prevent length identification
+        val buckets = listOf(4096, 32768, 131072, 524288, 1048576, 5242880)
         val targetSize = buckets.find { it > json.length } ?: json.length
-        if (json.length >= targetSize) return json
-
-        // Append spaces to the end of JSON. GSON ignores trailing whitespace during parsing.
-        val paddingNeeded = targetSize - json.length
-        return json + " ".repeat(paddingNeeded)
+        return json.padEnd(targetSize, ' ')
     }
 
-    private fun sanitizeOnion(onion: String): String {
-        return onion.trim()
-            .removePrefix("http://")
-            .removePrefix("https://")
-            .removeSuffix("/")
-    }
+    private fun sanitizeOnion(o: String): String = o.trim()
+        .removePrefix("http://").removePrefix("https://").removeSuffix("/")
 }
