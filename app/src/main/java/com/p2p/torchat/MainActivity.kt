@@ -207,7 +207,12 @@ class MainActivity : ComponentActivity() {
                 }
                 is Screen.SeedRestore -> com.p2p.torchat.ui.screens.SeedScreen(SeedMode.INPUT, emptyList(), { handleSeedRestore(it) }, { currentScreenState = Screen.Settings })
             }
+            DialogsContent()
         }
+    }
+
+    @Composable private fun DialogsContent() {
+        // Future dialogs
     }
 
     private fun handleAuthResult(password: String): Boolean {

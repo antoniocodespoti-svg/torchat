@@ -8,7 +8,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import java.io.InputStream
+import java.io.DataInputStream
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
@@ -16,7 +16,7 @@ import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Hardened LocalServer for Tor P2P communication.
- * Implements DoS protection, input limits and concurrent connection management.
+ * Implements Binary Framing (NET-001) and DoS protection.
  */
 class LocalServer(
     private val port: Int = 8080,
@@ -24,8 +24,9 @@ class LocalServer(
 ) {
     companion object {
         private const val TAG = "LocalServer"
-        private const val LOOPBACK_ADDRESS = "127.0.0.1"
-        private const val MAX_PAYLOAD_SIZE = 10 * 1024 * 1024 // 10MB limit
+        private const val MAGIC_BYTE: Byte = 0x54 // 'T'
+        private const val PROTOCOL_VERSION: Byte = 0x01
+        private const val MAX_PAYLOAD_SIZE = 10 * 1024 * 1024 // 10MB
         private const val MAX_CONCURRENT_CONNECTIONS = 5
     }
 
@@ -41,7 +42,7 @@ class LocalServer(
             try {
                 serverSocket = ServerSocket()
                 serverSocket?.reuseAddress = true
-                serverSocket?.bind(InetSocketAddress(LOOPBACK_ADDRESS, port))
+                serverSocket?.bind(InetSocketAddress("127.0.0.1", port))
 
                 while (isActive) {
                     val clientSocket = serverSocket?.accept() ?: break
@@ -61,37 +62,37 @@ class LocalServer(
         activeConnections.incrementAndGet()
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                socket.soTimeout = 30000 // 30s timeout for reading
-                val inputStream = socket.getInputStream()
-                val rawData = readWithLimit(inputStream, MAX_PAYLOAD_SIZE)
+                socket.soTimeout = 30000
+                val dis = DataInputStream(socket.getInputStream())
 
-                if (rawData.isNotEmpty()) {
-                    val json = String(rawData, Charsets.UTF_8).trim()
-                    if (json.startsWith("{") && json.endsWith("}")) {
-                        val payload = gson.fromJson(json, NetworkPayload::class.java)
-                        onMessageReceived(payload)
-                    }
-                }
+                // 1. Read Magic Byte
+                if (dis.readByte() != MAGIC_BYTE) return@launch
+
+                // 2. Read Version
+                if (dis.readByte() != PROTOCOL_VERSION) return@launch
+
+                // 3. Skip Type & Sequence (not used for routing here)
+                dis.skipBytes(5)
+
+                // 4. Read Length
+                val length = dis.readInt()
+                if (length <= 0 || length > MAX_PAYLOAD_SIZE) return@launch
+
+                // 5. Read Payload
+                val payloadBytes = ByteArray(length)
+                dis.readFully(payloadBytes)
+
+                val json = String(payloadBytes, Charsets.UTF_8).trim()
+                val payload = gson.fromJson(json, NetworkPayload::class.java)
+                onMessageReceived(payload)
+
             } catch (e: Exception) {
-                // Fail silently to avoid leaking info in logs
+                // Silently drop invalid packets
             } finally {
                 activeConnections.decrementAndGet()
                 try { socket.close() } catch (e: Exception) {}
             }
         }
-    }
-
-    private fun readWithLimit(input: InputStream, limit: Int): ByteArray {
-        val buffer = ByteArray(8192)
-        val output = java.io.ByteArrayOutputStream()
-        var totalRead = 0
-        while (totalRead < limit) {
-            val read = input.read(buffer, 0, minOf(buffer.size, limit - totalRead))
-            if (read <= 0) break
-            output.write(buffer, 0, read)
-            totalRead += read
-        }
-        return output.toByteArray()
     }
 
     fun stopServer() {

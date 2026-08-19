@@ -8,14 +8,14 @@ plugins {
 
 android {
     namespace = "com.p2p.torchat"
-    compileSdk = 34
+    compileSdk = 36 // Updated for 2026 guidelines (ANDROID-001)
 
     defaultConfig {
         applicationId = "com.p2p.torchat"
         minSdk = 26
-        targetSdk = 34
-        versionCode = 3
-        versionName = "1.0.2"
+        targetSdk = 36 // Updated for 2026 guidelines (ANDROID-001)
+        versionCode = 4
+        versionName = "1.1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -50,7 +50,6 @@ android {
     buildFeatures {
         compose = true
     }
-    // Removed legacy composeOptions for Kotlin 2.0+
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
@@ -102,10 +101,6 @@ dependencies {
     // Image Loading & Metadata Cleaning
     implementation("io.coil-kt:coil-compose:2.7.0")
     implementation("androidx.exifinterface:exifinterface:1.3.7")
-
-    // Security & Encryption
-    // Removed security-crypto alpha dependency for Audit Point 17.
-    // Now using direct Android Keystore implementation.
 
     // CameraX
     val cameraVersion = "1.3.1"
