@@ -6,7 +6,6 @@ import android.graphics.BitmapFactory
 import android.net.Uri
 import android.provider.OpenableColumns
 import java.io.ByteArrayOutputStream
-import java.io.InputStream
 
 class MediaManager(private val context: Context) {
     /**
@@ -15,12 +14,14 @@ class MediaManager(private val context: Context) {
      */
     fun stripImageMetadata(uri: Uri): ByteArray? {
         return try {
-            val inputStream: InputStream? = context.contentResolver.openInputStream(uri)
-            val bitmap = BitmapFactory.decodeStream(inputStream)
+            val bitmap =
+                context.contentResolver.openInputStream(uri)?.use { inputStream ->
+                    BitmapFactory.decodeStream(inputStream)
+                }
 
             val outputStream = ByteArrayOutputStream()
             // Compression to JPEG strips all original EXIF tags automatically in Android
-            bitmap.compress(Bitmap.CompressFormat.JPEG, 80, outputStream)
+            bitmap?.compress(Bitmap.CompressFormat.JPEG, 80, outputStream)
 
             outputStream.toByteArray()
         } catch (e: java.io.IOException) {
@@ -35,8 +36,9 @@ class MediaManager(private val context: Context) {
      */
     fun getFileBytes(uri: Uri): ByteArray? {
         return try {
-            val inputStream = context.contentResolver.openInputStream(uri)
-            inputStream?.readBytes()
+            context.contentResolver.openInputStream(uri)?.use { inputStream ->
+                inputStream.readBytes()
+            }
         } catch (e: java.io.IOException) {
             null
         } catch (e: Exception) {

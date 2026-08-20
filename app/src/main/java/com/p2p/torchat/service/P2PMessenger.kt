@@ -33,32 +33,33 @@ class P2PMessenger(
         kotlinx.coroutines.delay(Random.nextLong(100, 500))
 
         repeat(2) { attempt ->
-            val result = withContext(Dispatchers.IO) {
-                try {
-                    val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress(socksProxyHost, socksProxyPort))
-                    val socket = Socket(proxy)
-                    socket.connect(InetSocketAddress.createUnresolved(cleanOnion, 80), timeoutMs)
+            val result =
+                withContext(Dispatchers.IO) {
+                    try {
+                        val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress(socksProxyHost, socksProxyPort))
+                        val socket = Socket(proxy)
+                        socket.connect(InetSocketAddress.createUnresolved(cleanOnion, 80), timeoutMs)
 
-                    val dos = DataOutputStream(socket.getOutputStream())
-                    val json = addBucketedPadding(gson.toJson(payload))
-                    val jsonBytes = json.toByteArray(Charsets.UTF_8)
+                        val dos = DataOutputStream(socket.getOutputStream())
+                        val json = addBucketedPadding(gson.toJson(payload))
+                        val jsonBytes = json.toByteArray(Charsets.UTF_8)
 
-                    // Write Binary Header
-                    dos.writeByte(MAGIC_BYTE.toInt())
-                    dos.writeByte(PROTOCOL_VERSION.toInt())
-                    dos.writeByte(payload.type.ordinal)
-                    dos.writeInt(payload.sequenceNumber)
-                    dos.writeInt(jsonBytes.size)
+                        // Write Binary Header
+                        dos.writeByte(MAGIC_BYTE.toInt())
+                        dos.writeByte(PROTOCOL_VERSION.toInt())
+                        dos.writeByte(payload.type.ordinal)
+                        dos.writeInt(payload.sequenceNumber)
+                        dos.writeInt(jsonBytes.size)
 
-                    // Write Payload
-                    dos.write(jsonBytes)
-                    dos.flush()
-                    socket.close()
-                    Result.success(true)
-                } catch (e: Exception) {
-                    Result.failure(e)
+                        // Write Payload
+                        dos.write(jsonBytes)
+                        dos.flush()
+                        socket.close()
+                        Result.success(true)
+                    } catch (e: Exception) {
+                        Result.failure(e)
+                    }
                 }
-            }
             if (result.isSuccess) return Result.success(true)
             if (attempt < 1) kotlinx.coroutines.delay(2000)
         }
@@ -71,6 +72,7 @@ class P2PMessenger(
         return json.padEnd(targetSize, ' ')
     }
 
-    private fun sanitizeOnion(o: String): String = o.trim()
-        .removePrefix("http://").removePrefix("https://").removeSuffix("/")
+    private fun sanitizeOnion(o: String): String =
+        o.trim()
+            .removePrefix("http://").removePrefix("https://").removeSuffix("/")
 }

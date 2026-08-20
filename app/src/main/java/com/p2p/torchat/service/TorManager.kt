@@ -12,8 +12,11 @@ import java.net.Socket
 
 sealed class TorState {
     object Stopped : TorState()
+
     object Starting : TorState()
+
     data class Running(val onionAddress: String, val socksPort: Int = 9050) : TorState()
+
     data class Error(val message: String) : TorState()
 }
 
@@ -31,17 +34,21 @@ class TorManager(private val context: Context) {
         const val ACTION_REQUEST_V3_ONION_SERVICE = "org.torproject.android.intent.action.REQUEST_V3_ONION_SERVICE"
     }
 
-    fun isOrbotInstalled(): Boolean = try {
-        context.packageManager.getPackageInfo(ORBOT_PACKAGE, 0)
-        true
-    } catch (e: Exception) { false }
+    fun isOrbotInstalled(): Boolean =
+        try {
+            context.packageManager.getPackageInfo(ORBOT_PACKAGE, 0)
+            true
+        } catch (e: Exception) {
+            false
+        }
 
-    fun getOrbotRequestIntent(): Intent = Intent(ACTION_REQUEST_V3_ONION_SERVICE).apply {
-        setPackage(ORBOT_PACKAGE)
-        putExtra("localPort", 8080)
-        putExtra("onionPort", 80)
-        putExtra("name", "TorP2PChat")
-    }
+    fun getOrbotRequestIntent(): Intent =
+        Intent(ACTION_REQUEST_V3_ONION_SERVICE).apply {
+            setPackage(ORBOT_PACKAGE)
+            putExtra("localPort", 8080)
+            putExtra("onionPort", 80)
+            putExtra("name", "TorP2PChat")
+        }
 
     /**
      * Actively verifies the status of the Tor SOCKS proxy.

@@ -40,13 +40,16 @@ private val LightColorScheme =
         primary = Color(0xFF0891B2),
         secondary = Color(0xFFC026D3),
         tertiary = Color(0xFF16A34A),
-        background = Color(0xFFF1F5F9), // Slate 100 for better contrast
+        // Slate 100 for better contrast
+        background = Color(0xFFF1F5F9),
         surface = Color.White,
         onPrimary = Color.White,
         onSecondary = Color.White,
-        onBackground = Color(0xFF0F172A), // Dark slate text
+        // Dark slate text
+        onBackground = Color(0xFF0F172A),
         onSurface = Color(0xFF0F172A),
-        surfaceVariant = Color(0xFFE2E8F0), // Slate 200 for cards
+        // Slate 200 for cards
+        surfaceVariant = Color(0xFFE2E8F0),
         onSurfaceVariant = Color(0xFF334155),
     )
 

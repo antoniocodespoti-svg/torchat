@@ -35,12 +35,13 @@ fun VerificationScreen(
     onVerify: () -> Unit,
     onBack: () -> Unit,
 ) {
-    val keyToVerify = if (peer.identityPublicKey.isNotEmpty()) peer.identityPublicKey else peer.handshakePublicKey
+    val keyToVerify = peer.identityPublicKey
 
     val fingerprint = remember(keyToVerify) {
         try {
-            if (keyToVerify.isEmpty()) "NESSUNA CHIAVE"
-            else {
+            if (keyToVerify.isEmpty()) {
+                "NESSUNA CHIAVE"
+            } else {
                 val pubKey = E2EManager.stringToPublicKey(keyToVerify, "Ed25519")
                 E2EManager.getFingerprint(pubKey)
             }
@@ -52,22 +53,23 @@ fun VerificationScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("VERIFICA IDENTITÀ") },
+                title = { Text("VERIFICA IDENTITÀ", color = NeonCyan) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Indietro")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Indietro", tint = NeonCyan)
                     }
                 },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Black)
             )
         },
+        containerColor = Color.Black
     ) { padding ->
         Column(
             modifier = Modifier
-                    .fillMaxSize()
-                    .padding(padding)
-                    .background(Color.Black)
-                    .padding(24.dp)
-                    .verticalScroll(rememberScrollState()),
+                .fillMaxSize()
+                .padding(padding)
+                .padding(24.dp)
+                .verticalScroll(rememberScrollState()),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Icon(
@@ -95,7 +97,7 @@ fun VerificationScreen(
             Spacer(modifier = Modifier.height(32.dp))
 
             Text(
-                text = "Per essere sicuro di parlare con la persona giusta, confronta questo codice o scansiona il QR code qui sotto.",
+                text = "Confronta il fingerprint o scansiona il QR code per validare l'identità.",
                 style = MaterialTheme.typography.bodySmall,
                 color = Color.Gray,
                 textAlign = TextAlign.Center,
@@ -143,19 +145,16 @@ fun VerificationScreen(
                 ) {
                     Text("MARCA COME VERIFICATO", color = Color.Black, fontWeight = FontWeight.Bold)
                 }
-            } else {
-                OutlinedButton(
-                    onClick = onBack,
-                    modifier = Modifier.fillMaxWidth().height(56.dp),
-                ) {
-                    Text("OK, TORNA INDIETRO", color = Color.White)
-                }
             }
         }
     }
 }
 
-private fun generateQR(text: String, width: Int, height: Int): Bitmap? {
+private fun generateQR(
+    text: String,
+    width: Int,
+    height: Int,
+): Bitmap? {
     return try {
         val writer = QRCodeWriter()
         val bitMatrix = writer.encode(text, BarcodeFormat.QR_CODE, width, height)

@@ -38,24 +38,25 @@ class LocalServer(
     fun startServer() {
         if (serverJob != null && serverJob!!.isActive) return
 
-        serverJob = CoroutineScope(Dispatchers.IO).launch {
-            try {
-                serverSocket = ServerSocket()
-                serverSocket?.reuseAddress = true
-                serverSocket?.bind(InetSocketAddress("127.0.0.1", port))
+        serverJob =
+            CoroutineScope(Dispatchers.IO).launch {
+                try {
+                    serverSocket = ServerSocket()
+                    serverSocket?.reuseAddress = true
+                    serverSocket?.bind(InetSocketAddress("127.0.0.1", port))
 
-                while (isActive) {
-                    val clientSocket = serverSocket?.accept() ?: break
-                    if (activeConnections.get() >= MAX_CONCURRENT_CONNECTIONS) {
-                        clientSocket.close()
-                        continue
+                    while (isActive) {
+                        val clientSocket = serverSocket?.accept() ?: break
+                        if (activeConnections.get() >= MAX_CONCURRENT_CONNECTIONS) {
+                            clientSocket.close()
+                            continue
+                        }
+                        handleClient(clientSocket)
                     }
-                    handleClient(clientSocket)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Server error: ${e.message}")
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "Server error: ${e.message}")
             }
-        }
     }
 
     private fun handleClient(socket: Socket) {
@@ -63,34 +64,46 @@ class LocalServer(
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 socket.soTimeout = 30000
-                val dis = DataInputStream(socket.getInputStream())
+                socket.getInputStream().use { inputStream ->
+                    val dis = DataInputStream(inputStream)
 
-                // 1. Read Magic Byte
-                if (dis.readByte() != MAGIC_BYTE) return@launch
+                    // 1. Read Magic Byte
+                    if (dis.readByte() != MAGIC_BYTE) return@launch
 
-                // 2. Read Version
-                if (dis.readByte() != PROTOCOL_VERSION) return@launch
+                    // 2. Read Version
+                    if (dis.readByte() != PROTOCOL_VERSION) return@launch
 
-                // 3. Skip Type & Sequence (not used for routing here)
-                dis.skipBytes(5)
+                    // 3. Read Type & Sequence
+                    val typeByte = dis.readByte().toInt()
+                    val seq = dis.readInt()
 
-                // 4. Read Length
-                val length = dis.readInt()
-                if (length <= 0 || length > MAX_PAYLOAD_SIZE) return@launch
+                    // Validate Type
+                    if (typeByte < 0 || typeByte >= com.p2p.torchat.model.PayloadType.entries.size) return@launch
 
-                // 5. Read Payload
-                val payloadBytes = ByteArray(length)
-                dis.readFully(payloadBytes)
+                    // 4. Read Length
+                    val length = dis.readInt()
+                    if (length <= 0 || length > MAX_PAYLOAD_SIZE) return@launch
 
-                val json = String(payloadBytes, Charsets.UTF_8).trim()
-                val payload = gson.fromJson(json, NetworkPayload::class.java)
-                onMessageReceived(payload)
+                    // 5. Read Payload
+                    val payloadBytes = ByteArray(length)
+                    dis.readFully(payloadBytes)
 
+                    val json = String(payloadBytes, Charsets.UTF_8).trim()
+                    val payload = gson.fromJson(json, NetworkPayload::class.java)
+
+                    // Validate sequence number matches header
+                    if (payload.sequenceNumber != seq) return@launch
+
+                    onMessageReceived(payload)
+                }
             } catch (e: Exception) {
                 // Silently drop invalid packets
             } finally {
                 activeConnections.decrementAndGet()
-                try { socket.close() } catch (e: Exception) {}
+                try {
+                    socket.close()
+                } catch (e: Exception) {
+                }
             }
         }
     }
@@ -99,6 +112,7 @@ class LocalServer(
         try {
             serverSocket?.close()
             serverJob?.cancel()
-        } catch (e: Exception) {}
+        } catch (e: Exception) {
+        }
     }
 }

@@ -14,7 +14,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
 import com.p2p.torchat.ui.theme.NeonCyan
@@ -26,77 +25,36 @@ fun QRCodeScreen(
     onionAddress: String,
     myAlias: String,
     myPublicKey: String,
-    onBack: () -> Unit,
+    onBack: () -> Unit
 ) {
-    val qrBitmap =
-        remember(onionAddress, myAlias, myPublicKey) {
-            val qrData = "$onionAddress|$myAlias|$myPublicKey"
-            generateQRCodeBitmap(qrData, 512, 512)
-        }
+    val qrContent = "$onionAddress|$myAlias|$myPublicKey"
+    val qrBitmap = remember { generateQRCode(qrContent, 512, 512) }
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("IL TUO QR CODE", letterSpacing = 1.sp, fontWeight = FontWeight.Bold) },
+                title = { Text("IL TUO CODICE QR", color = NeonCyan) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(imageVector = Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Indietro")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Indietro", tint = NeonCyan)
                     }
                 },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Black)
             )
         },
+        containerColor = Color.Black
     ) { padding ->
-        Column(
-            modifier =
-                Modifier
-                    .fillMaxSize()
-                    .padding(padding)
-                    .padding(24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center,
-        ) {
-            Text(
-                text = "Mostra questo codice a un amico",
-                style = MaterialTheme.typography.bodyMedium,
-                color = Color.Gray,
-            )
-
-            Spacer(modifier = Modifier.height(24.dp))
-
-            qrBitmap?.let { bitmap ->
-                Card(
-                    elevation = CardDefaults.cardElevation(8.dp),
-                    border = androidx.compose.foundation.BorderStroke(2.dp, NeonCyan),
-                ) {
-                    Image(
-                        bitmap = bitmap.asImageBitmap(),
-                        contentDescription = "QR Code Onion Address",
-                        modifier =
-                            Modifier
-                                .size(260.dp)
-                                .background(Color.White)
-                                .padding(16.dp),
-                    )
-                }
+        Column(modifier = Modifier.padding(padding).fillMaxSize().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            Text("Mostra questo codice a un amico per aggiungerlo.", color = Color.White)
+            Spacer(modifier = Modifier.height(32.dp))
+            qrBitmap?.let {
+                Image(bitmap = it.asImageBitmap(), contentDescription = "QR Code", modifier = Modifier.size(300.dp).background(Color.White).padding(8.dp))
             }
-
-            Spacer(modifier = Modifier.height(24.dp))
-
-            Text(
-                text = onionAddress,
-                style = MaterialTheme.typography.bodySmall,
-                color = NeonCyan,
-                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-            )
         }
     }
 }
 
-fun generateQRCodeBitmap(
-    text: String,
-    width: Int,
-    height: Int,
-): Bitmap? {
+private fun generateQRCode(text: String, width: Int, height: Int): Bitmap? {
     return try {
         val writer = QRCodeWriter()
         val bitMatrix = writer.encode(text, BarcodeFormat.QR_CODE, width, height)
@@ -107,8 +65,5 @@ fun generateQRCodeBitmap(
             }
         }
         bitmap
-    } catch (e: Exception) {
-        e.printStackTrace()
-        null
-    }
+    } catch (e: Exception) { null }
 }

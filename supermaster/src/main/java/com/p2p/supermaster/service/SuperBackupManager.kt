@@ -8,7 +8,7 @@ import com.p2p.supermaster.crypto.MnemonicManager
 
 data class SuperBackupData(
     val collaborators: List<MasterCollaborator>,
-    val seed: List<String>,
+    val entropy: String,
     val passwordHash: String?,
 )
 
@@ -23,20 +23,19 @@ class SuperBackupManager(private val context: Context) {
         passwordHash: String?,
     ): String {
         val key = MnemonicManager.deriveKeyFromMnemonic(mnemonic, salt)
-        val encryptedData = createEncryptedBackupWithKey(key, collaborators, passwordHash)
+        val entropy = MnemonicManager.mnemonicToEntropy(mnemonic) ?: throw Exception("Invalid seed")
+        val data =
+            SuperBackupData(
+                collaborators = collaborators,
+                entropy = java.util.Base64.getEncoder().encodeToString(entropy),
+                passwordHash = passwordHash,
+            )
+        val json = gson.toJson(data)
+        val encryptedData = E2EManager.encrypt(json, key)
+
         // Bundle Salt with data: "SALT_BASE64|ENCRYPTED_DATA"
         val saltBase64 = java.util.Base64.getEncoder().encodeToString(salt)
         return "$saltBase64|$encryptedData"
-    }
-
-    fun createEncryptedBackupWithKey(
-        key: javax.crypto.spec.SecretKeySpec,
-        collaborators: List<MasterCollaborator>,
-        passwordHash: String?,
-    ): String {
-        val data = SuperBackupData(collaborators, emptyList(), passwordHash)
-        val json = gson.toJson(data)
-        return E2EManager.encrypt(json, key)
     }
 
     fun restoreFromEncryptedBackup(
@@ -47,30 +46,21 @@ class SuperBackupManager(private val context: Context) {
             val parts = fullBackupPackage.split("|")
             val (salt, encryptedData) =
                 if (parts.size == 2) {
-                    // New format: Salt included
                     java.util.Base64.getDecoder().decode(parts[0]) to parts[1]
                 } else {
-                    // Old format fallback
-                    null to fullBackupPackage
+                    return null
                 }
-
-            if (salt == null) return null
 
             val key = MnemonicManager.deriveKeyFromMnemonic(mnemonic, salt)
             val json = E2EManager.decrypt(encryptedData, key)
             val data = gson.fromJson(json, SuperBackupData::class.java)
 
-            val currentPasswordHash = prefs.getString("super_password_hash", null)
-
-            // Store persistent key during restoration
-            val keyBase64 = android.util.Base64.encodeToString(key.encoded, android.util.Base64.DEFAULT)
-            prefs.edit().putString("persistent_backup_key", keyBase64).apply()
-
-            if (currentPasswordHash != null) {
-                data.copy(passwordHash = currentPasswordHash)
-            } else {
-                data
+            prefs.edit().apply {
+                putString("super_password_hash", data.passwordHash)
+                putString("super_seed", mnemonic.joinToString(" "))
+                apply()
             }
+            data
         } catch (e: Exception) {
             null
         }
