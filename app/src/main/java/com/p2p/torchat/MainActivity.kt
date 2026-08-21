@@ -12,6 +12,10 @@ import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.viewModels
+import com.p2p.torchat.ui.viewmodel.AuthViewModel
+import com.p2p.torchat.ui.viewmodel.ChatViewModel
+import com.p2p.torchat.data.ChatRepository
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.fillMaxSize
@@ -48,6 +52,10 @@ class MainActivity : ComponentActivity() {
     private lateinit var mediaManager: MediaManager
     private val totpManager = TotpManager()
     private val timeFetcher = NetworkTimeFetcher()
+
+    private val authViewModel: AuthViewModel by viewModels()
+    private val chatRepository by lazy { ChatRepository(p2pMessenger, torManager) }
+    private val chatViewModel: ChatViewModel by lazy { ChatViewModel(chatRepository) }
 
     private var myIdentityKeyPair: KeyPair? = null
     private val activeSessions = mutableStateMapOf<String, SymmetricRatchetSession>()
@@ -220,21 +228,27 @@ class MainActivity : ComponentActivity() {
     private fun handleIncomingPacket(packet: RawPacket) {
         CoroutineScope(Dispatchers.Main).launch {
             try {
+                val onion = packet.senderOnion
                 when (PayloadType.entries[packet.type.toInt()]) {
-                    PayloadType.SESSION_HANDSHAKE -> handleHandshakeReceived(packet.dataB64)
+                    PayloadType.SESSION_HANDSHAKE -> handleHandshakeReceived(packet.dataB64, onion)
                     PayloadType.CHAT_MESSAGE, PayloadType.IMAGE, PayloadType.FILE -> {
-                        activeSessions.forEach { (onion, session) ->
+                        val session = activeSessions[onion]
+                        if (session != null) {
                             try {
-                                val key = session.getReceiveKey(packet.sequenceNumber)
                                 val aad = E2EManager.buildAAD(packet.version, packet.type, packet.sequenceNumber, onion)
-                                val dec = E2EManager.decryptV2(packet.dataB64, key, aad)
+                                val dec = session.tryDecrypt(packet.sequenceNumber, packet.dataB64, aad) { enc, key, a ->
+                                    E2EManager.decryptV2(enc, key, a)
+                                }
 
                                 val msg = Message(UUID.randomUUID().toString(), onion, (torManager.torState.value as? TorState.Running)?.onionAddress ?: "", dec, System.currentTimeMillis(), false, true, false, PayloadType.entries[packet.type.toInt()], null, packet.sequenceNumber)
                                 messagesMap.getOrPut(onion) { mutableStateListOf() }.add(msg)
                                 if (currentScreenState !is Screen.Chat || (currentScreenState as Screen.Chat).peer.onionAddress != onion) unreadCounts[onion] = (unreadCounts[onion] ?: 0) + 1
                                 notificationHelper.showChatNotification(peersList.find { it.onionAddress == onion }?.alias ?: "Contatto", dec)
-                                return@launch
-                            } catch (e: Exception) { }
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Decryption error for $onion: ${e.message}")
+                            }
+                        } else {
+                            Log.w(TAG, "No active session for $onion")
                         }
                     }
                     else -> {}
@@ -243,38 +257,82 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun handleHandshakeReceived(dataB64: String) {
+    private fun handleHandshakeReceived(dataB64: String, senderOnion: String) {
         try {
+            val myOnion = (torManager.torState.value as? TorState.Running)?.onionAddress ?: return
             val json = String(Base64.getDecoder().decode(dataB64), Charsets.UTF_8)
             val p = Gson().fromJson(json, NetworkPayload::class.java)
             val pts = p.payloadData.split("|"); if (pts.size < 4) return
-            val existing = peersList.find { it.onionAddress == p.senderOnion } ?: return
-            val peerIdentityKey = E2EManager.stringToPublicKey(pts[2], Constants.ED25519_ALGO)
-            if (existing.identityPublicKey.isNotEmpty() && existing.identityPublicKey != pts[2]) return
-            if (!E2EManager.verifySignature(pts[0].toByteArray(Charsets.UTF_8), Base64.getDecoder().decode(pts[1]), peerIdentityKey)) return
-            val peerEphemeralKey = E2EManager.stringToPublicKey(pts[0], Constants.X25519_ALGO)
-            val myEphemeral = pendingEphemeralKeys.remove(p.senderOnion) ?: E2EManager.generateEphemeralKeyPair().also { respKeyPair ->
+
+            val peerEKStr = pts[0]
+            val peerSig = Base64.getDecoder().decode(pts[1])
+            val peerIKStr = pts[2]
+            val type = pts[3] // "PFS" or "PFS_RESP"
+
+            val existing = peersList.find { it.onionAddress == senderOnion } ?: return
+            val peerIdentityKey = E2EManager.stringToPublicKey(peerIKStr, Constants.ED25519_ALGO)
+            if (existing.identityPublicKey.isNotEmpty() && existing.identityPublicKey != peerIKStr) return
+
+            // Verify Transcript Signature
+            val transcript = if (type == "PFS") {
+                E2EManager.buildHandshakeTranscript(senderOnion, myOnion, peerIKStr, peerEKStr, E2EManager.publicKeyToString(myIdentityKeyPair!!.public), "")
+            } else {
+                val myEphemeral = pendingEphemeralKeys[senderOnion] ?: return
+                E2EManager.buildHandshakeTranscript(myOnion, senderOnion, E2EManager.publicKeyToString(myIdentityKeyPair!!.public), E2EManager.publicKeyToString(myEphemeral.public), peerIKStr, peerEKStr)
+            }
+
+            if (!E2EManager.verifySignature(transcript, peerSig, peerIdentityKey)) {
+                Log.e(TAG, "Handshake signature verification failed")
+                return
+            }
+
+            val peerEphemeralKey = E2EManager.stringToPublicKey(peerEKStr, Constants.X25519_ALGO)
+
+            if (type == "PFS") {
+                // We are Bob (Responder)
+                val respKeyPair = E2EManager.generateEphemeralKeyPair()
                 val respEKStr = E2EManager.publicKeyToString(respKeyPair.public)
-                val respSig = Base64.getEncoder().encodeToString(E2EManager.signData(respEKStr.toByteArray(Charsets.UTF_8), myIdentityKeyPair!!.private))
+
+                val respTranscript = E2EManager.buildHandshakeTranscript(senderOnion, myOnion, peerIKStr, peerEKStr, E2EManager.publicKeyToString(myIdentityKeyPair!!.public), respEKStr)
+                val respSig = Base64.getEncoder().encodeToString(E2EManager.signData(respTranscript, myIdentityKeyPair!!.private))
+
                 val respData = "$respEKStr|$respSig|${E2EManager.publicKeyToString(myIdentityKeyPair!!.public)}|PFS_RESP"
                 val respEnc = Base64.getEncoder().encodeToString(Gson().toJson(NetworkPayload(
                     type = PayloadType.SESSION_HANDSHAKE,
-                    senderOnion = (torManager.torState.value as? TorState.Running)?.onionAddress ?: "",
-                    recipientOnion = p.senderOnion,
+                    senderOnion = myOnion,
+                    recipientOnion = senderOnion,
                     payloadData = respData
                 )).toByteArray(Charsets.UTF_8))
+
                 CoroutineScope(Dispatchers.IO).launch {
-                    p2pMessenger.sendEncryptedPayload(p.senderOnion, PayloadType.SESSION_HANDSHAKE.ordinal.toByte(), 0, respEnc, timeoutMs = 30000)
+                    p2pMessenger.sendEncryptedPayload(myOnion, senderOnion, PayloadType.SESSION_HANDSHAKE.ordinal.toByte(), 0, respEnc, timeoutMs = 30000)
                 }
+
+                val sharedSecret = E2EManager.calculateSharedSecret(respKeyPair.private, peerEphemeralKey)
+                val (send, receive) = E2EManager.deriveInitialChainKeys(sharedSecret, myOnion, senderOnion)
+                activeSessions[senderOnion] = SymmetricRatchetSession(send, receive)
+            } else {
+                // We are Alice (Initiator)
+                val myEphemeral = pendingEphemeralKeys.remove(senderOnion) ?: return
+                val sharedSecret = E2EManager.calculateSharedSecret(myEphemeral.private, peerEphemeralKey)
+                val (send, receive) = E2EManager.deriveInitialChainKeys(sharedSecret, myOnion, senderOnion)
+                activeSessions[senderOnion] = SymmetricRatchetSession(send, receive)
             }
-            val sharedSecret = E2EManager.calculateSharedSecret(myEphemeral.private, peerEphemeralKey)
-            activeSessions[p.senderOnion] = SymmetricRatchetSession(sharedSecret)
-            handshakeLoading[p.senderOnion] = false
+            handshakeLoading[senderOnion] = false
         } catch (e: Exception) { Log.e(TAG, "Handshake error", e) }
     }
 
 
-    private fun initializeSystem() { torManager = TorManager(this); p2pMessenger = P2PMessenger(); notificationHelper = NotificationHelper(this); backupManager = BackupManager(this); mediaManager = MediaManager(this) }
+    private fun initializeSystem() {
+        torManager = TorManager(this)
+        p2pMessenger = P2PMessenger()
+        notificationHelper = NotificationHelper(this)
+        backupManager = BackupManager(this)
+        mediaManager = MediaManager(this)
+
+        val isHardware = E2EManager.isHardwareBacked()
+        Log.i(TAG, "Hardware Keystore backed: $isHardware")
+    }
     private fun loadPreferences() {
         val p = getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE)
         myAlias = p.getString(Constants.KEY_MY_ALIAS, "Amico") ?: "Amico"
@@ -296,7 +354,7 @@ class MainActivity : ComponentActivity() {
         val msg = Message(UUID.randomUUID().toString(), myOnion, peer.onionAddress, content, System.currentTimeMillis(), true, false, false, PayloadType.CHAT_MESSAGE, null, session.sendSequence)
         messageList.add(msg)
         CoroutineScope(Dispatchers.IO).launch {
-            val res = p2pMessenger.sendEncryptedPayload(peer.onionAddress, PayloadType.CHAT_MESSAGE.ordinal.toByte(), session.sendSequence, encrypted)
+            val res = p2pMessenger.sendEncryptedPayload(myOnion, peer.onionAddress, PayloadType.CHAT_MESSAGE.ordinal.toByte(), session.sendSequence, encrypted)
             withContext(Dispatchers.Main) { val idx = messageList.indexOf(msg); if (idx != -1) messageList[idx] = msg.copy(isDelivered = res.isSuccess, isError = !res.isSuccess) }
         }
     }
@@ -304,10 +362,10 @@ class MainActivity : ComponentActivity() {
     private fun handleMediaPick(u: Uri, i: Boolean) { val p = activeChatPeer ?: return; val m = activeChatMessages ?: return; CoroutineScope(Dispatchers.IO).launch { val b = if (i) mediaManager.stripImageMetadata(u) else mediaManager.getFileBytes(u); b?.let { val b64 = Base64.getEncoder().encodeToString(it); withContext(Dispatchers.Main) { sendMessage(p, b64, m) } } } }
     private fun saveAttachmentToExternalStorage(f: String, b: String) { try { val bts = Base64.getDecoder().decode(b); val v = ContentValues().apply { put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, f) }; val uri = contentResolver.insert(if (Build.VERSION.SDK_INT >= 29) android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI else android.provider.MediaStore.Files.getContentUri("external"), v); uri?.let { contentResolver.openOutputStream(it)?.use { os -> os.write(bts) }; CoroutineScope(Dispatchers.Main).launch { Toast.makeText(this@MainActivity, "OK", Toast.LENGTH_SHORT).show() } } } catch (e: Exception) { } }
     private fun sanitizeOnionAddress(o: String): String = o.trim().removePrefix("http://").removePrefix("https://").removeSuffix("/")
-    private fun loadPeersFromPrefs(p: android.content.SharedPreferences): List<Peer> { val d = p.getString(Constants.KEY_SAVED_PEERS, null) ?: return emptyList(); return try { val json = if (d.startsWith("[")) d else { val h = p.getString(Constants.KEY_PASS_HASH, null); if (h != null) E2EManager.decrypt(d, E2EManager.deriveKeyFromSecret(h)) else d }; Gson().fromJson(json, object : TypeToken<List<Peer>>() {}.type) } catch (e: Exception) { emptyList() } }
-    private fun savePeers() { val p = getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE); val j = Gson().toJson(peersList.toList()); try { val h = p.getString(Constants.KEY_PASS_HASH, null); val data = if (h != null) E2EManager.encrypt(j, E2EManager.deriveKeyFromSecret(h)) else j; p.edit().putString(Constants.KEY_SAVED_PEERS, data).apply() } catch (e: Exception) { p.edit().putString(Constants.KEY_SAVED_PEERS, j).apply() } }
-    private fun getOrCreateSalt(): ByteArray { val p = getSharedPreferences("secure_prefs_salt", Context.MODE_PRIVATE); val sEnc = p.getString("install_salt_enc", null) ?: return generateAndSaveSalt(p); return try { Base64.getDecoder().decode(E2EManager.decryptWithHardwareKey(sEnc)) } catch (e: Exception) { generateAndSaveSalt(p) } }
-    private fun generateAndSaveSalt(p: android.content.SharedPreferences): ByteArray { val s = ByteArray(16).apply { SecureRandom().nextBytes(this) }; val enc = E2EManager.encryptWithHardwareKey(Base64.getEncoder().encodeToString(s)); p.edit().putString("install_salt_enc", enc).apply(); return s }
+    private fun loadPeersFromPrefs(p: android.content.SharedPreferences): List<Peer> { val d = p.getString(Constants.KEY_SAVED_PEERS, null) ?: return emptyList(); return try { val json = if (d.startsWith("[")) d else { val h = p.getString(Constants.KEY_PASS_HASH, null); if (h != null) E2EManager.decrypt(d, E2EManager.deriveKeyFromSecret(h, getOrCreateSalt())) else d }; Gson().fromJson(json, object : TypeToken<List<Peer>>() {}.type) } catch (e: Exception) { emptyList() } }
+    private fun savePeers() { val p = getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE); val j = Gson().toJson(peersList.toList()); try { val h = p.getString(Constants.KEY_PASS_HASH, null); val data = if (h != null) E2EManager.encrypt(j, E2EManager.deriveKeyFromSecret(h, getOrCreateSalt())) else j; p.edit().putString(Constants.KEY_SAVED_PEERS, data).apply() } catch (e: Exception) { p.edit().putString(Constants.KEY_SAVED_PEERS, j).apply() } }
+    private fun getOrCreateSalt(): ByteArray { val p = getSharedPreferences("secure_prefs_salt", Context.MODE_PRIVATE); val sEnc = p.getString("install_salt_enc", null) ?: return generateAndSaveSalt(p); return try { Base64.getDecoder().decode(E2EManager.decryptWithHardwareKey(sEnc).getOrThrow()) } catch (e: Exception) { generateAndSaveSalt(p) } }
+    private fun generateAndSaveSalt(p: android.content.SharedPreferences): ByteArray { val s = ByteArray(16).apply { SecureRandom().nextBytes(this) }; val enc = E2EManager.encryptWithHardwareKey(Base64.getEncoder().encodeToString(s)).getOrNull() ?: ""; p.edit().putString("install_salt_enc", enc).apply(); return s }
     private fun saveThemePreference(d: Boolean) { getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE).edit().putBoolean(Constants.KEY_DARK_THEME, d).apply() }
     private fun saveAvailabilityPreference(a: Boolean) { getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE).edit().putBoolean("is_available", a).apply() }
     private fun savePasswordHash(h: String) { getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE).edit().putString(Constants.KEY_PASS_HASH, h).apply() }
@@ -316,21 +374,27 @@ class MainActivity : ComponentActivity() {
     private fun saveAutoBackupPreference(e: Boolean) { getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE).edit().putBoolean(Constants.KEY_AUTO_BACKUP, e).apply() }
     private fun saveMyAlias(a: String) { getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE).edit().putString(Constants.KEY_MY_ALIAS, a).apply() }
     private fun performWipe() { getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE).edit().clear().apply(); try { E2EManager.deleteMasterKey() } catch (e: Exception) { }; val d = File(filesDir, "tor"); if (d.exists()) d.deleteRecursively(); System.exit(0) }
-    private fun loadOrGenerateIdentityKeys(p: android.content.SharedPreferences) { val pub = p.getString(Constants.KEY_PUBLIC_KEY, null); val privEnc = p.getString(Constants.KEY_PRIVATE_KEY_ENC, null); if (pub != null && privEnc != null) try { val priv = E2EManager.decryptWithHardwareKey(privEnc); val f = KeyFactory.getInstance(Constants.ED25519_ALGO); myIdentityKeyPair = KeyPair(f.generatePublic(X509EncodedKeySpec(Base64.getDecoder().decode(pub))), f.generatePrivate(PKCS8EncodedKeySpec(Base64.getDecoder().decode(priv)))) } catch (e: Exception) { generateNewIdentityKeys(p) } else generateNewIdentityKeys(p) }
-    private fun generateNewIdentityKeys(p: android.content.SharedPreferences) { myIdentityKeyPair = E2EManager.generateIdentityKeyPair(); val priv = Base64.getEncoder().encodeToString(myIdentityKeyPair!!.private.encoded); val enc = E2EManager.encryptWithHardwareKey(priv); p.edit().apply { putString(Constants.KEY_PUBLIC_KEY, E2EManager.publicKeyToString(myIdentityKeyPair!!.public)); putString(Constants.KEY_PRIVATE_KEY_ENC, enc); apply() } }
+    private fun loadOrGenerateIdentityKeys(p: android.content.SharedPreferences) { val pub = p.getString(Constants.KEY_PUBLIC_KEY, null); val privEnc = p.getString(Constants.KEY_PRIVATE_KEY_ENC, null); if (pub != null && privEnc != null) try { val priv = E2EManager.decryptWithHardwareKey(privEnc).getOrThrow(); val f = KeyFactory.getInstance(Constants.ED25519_ALGO); myIdentityKeyPair = KeyPair(f.generatePublic(X509EncodedKeySpec(Base64.getDecoder().decode(pub))), f.generatePrivate(PKCS8EncodedKeySpec(Base64.getDecoder().decode(priv)))) } catch (e: Exception) { generateNewIdentityKeys(p) } else generateNewIdentityKeys(p) }
+    private fun generateNewIdentityKeys(p: android.content.SharedPreferences) { myIdentityKeyPair = E2EManager.generateIdentityKeyPair(); val priv = Base64.getEncoder().encodeToString(myIdentityKeyPair!!.private.encoded); val enc = E2EManager.encryptWithHardwareKey(priv).getOrNull() ?: ""; p.edit().apply { putString(Constants.KEY_PUBLIC_KEY, E2EManager.publicKeyToString(myIdentityKeyPair!!.public)); putString(Constants.KEY_PRIVATE_KEY_ENC, enc); apply() } }
     private fun initiateHandshake(p: Peer) {
         if (p.identityPublicKey.isEmpty()) return
         if (handshakeLoading[p.onionAddress] == true) return
         handshakeLoading[p.onionAddress] = true
+        val myOnion = (torManager.torState.value as? TorState.Running)?.onionAddress ?: return
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 val myEphemeralKeyPair = E2EManager.generateEphemeralKeyPair()
                 pendingEphemeralKeys[p.onionAddress] = myEphemeralKeyPair
                 val eKStr = E2EManager.publicKeyToString(myEphemeralKeyPair.public)
-                val sig = Base64.getEncoder().encodeToString(E2EManager.signData(eKStr.toByteArray(Charsets.UTF_8), myIdentityKeyPair!!.private))
-                val data = "$eKStr|$sig|${E2EManager.publicKeyToString(myIdentityKeyPair!!.public)}|PFS"
-                val encryptedJson = Base64.getEncoder().encodeToString(Gson().toJson(NetworkPayload(type = PayloadType.SESSION_HANDSHAKE, senderOnion = (torManager.torState.value as? TorState.Running)?.onionAddress ?: "", recipientOnion = p.onionAddress, payloadData = data)).toByteArray(Charsets.UTF_8))
-                p2pMessenger.sendEncryptedPayload(p.onionAddress, PayloadType.SESSION_HANDSHAKE.ordinal.toByte(), 0, encryptedJson, timeoutMs = 30000)
+                val myIKStr = E2EManager.publicKeyToString(myIdentityKeyPair!!.public)
+
+                // Alice signs (initiator_onion, responder_onion, initiator_IK, initiator_EK, responder_IK="", responder_EK="")
+                val transcript = E2EManager.buildHandshakeTranscript(myOnion, p.onionAddress, myIKStr, eKStr, p.identityPublicKey, "")
+                val sig = Base64.getEncoder().encodeToString(E2EManager.signData(transcript, myIdentityKeyPair!!.private))
+
+                val data = "$eKStr|$sig|$myIKStr|PFS"
+                val encryptedJson = Base64.getEncoder().encodeToString(Gson().toJson(NetworkPayload(type = PayloadType.SESSION_HANDSHAKE, senderOnion = myOnion, recipientOnion = p.onionAddress, payloadData = data)).toByteArray(Charsets.UTF_8))
+                p2pMessenger.sendEncryptedPayload(myOnion, p.onionAddress, PayloadType.SESSION_HANDSHAKE.ordinal.toByte(), 0, encryptedJson, timeoutMs = 30000)
             } catch (e: Exception) {
                 pendingEphemeralKeys.remove(p.onionAddress)
             } finally {
@@ -339,6 +403,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun broadcastMyStatus(a: Boolean) { val my = (torManager.torState.value as? TorState.Running)?.onionAddress ?: ""; if (my.isEmpty()) return; peersList.forEach { val pay = Base64.getEncoder().encodeToString(Gson().toJson(NetworkPayload(type = PayloadType.PONG, senderOnion = my, recipientOnion = it.onionAddress, payloadData = if (a) "ONLINE" else "OFFLINE")).toByteArray(Charsets.UTF_8)); CoroutineScope(Dispatchers.IO).launch { p2pMessenger.sendEncryptedPayload(it.onionAddress, PayloadType.PONG.ordinal.toByte(), 0, pay, timeoutMs = 10000) } } }
+    private fun broadcastMyStatus(a: Boolean) { val my = (torManager.torState.value as? TorState.Running)?.onionAddress ?: ""; if (my.isEmpty()) return; peersList.forEach { val pay = Base64.getEncoder().encodeToString(Gson().toJson(NetworkPayload(type = PayloadType.PONG, senderOnion = my, recipientOnion = it.onionAddress, payloadData = if (a) "ONLINE" else "OFFLINE")).toByteArray(Charsets.UTF_8)); CoroutineScope(Dispatchers.IO).launch { p2pMessenger.sendEncryptedPayload(my, it.onionAddress, PayloadType.PONG.ordinal.toByte(), 0, pay, timeoutMs = 10000) } } }
     private fun checkAndRequestPermissions() { val p = mutableListOf(Manifest.permission.CAMERA); if (Build.VERSION.SDK_INT >= 33) p.add(Manifest.permission.POST_NOTIFICATIONS); val missing = p.filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }; if (missing.isNotEmpty()) permissionLauncher.launch(missing.toTypedArray()) }
 }

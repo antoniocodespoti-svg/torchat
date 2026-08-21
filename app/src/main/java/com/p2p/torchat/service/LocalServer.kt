@@ -20,6 +20,7 @@ data class RawPacket(
     val version: Byte,
     val type: Byte,
     val sequenceNumber: Int,
+    val senderOnion: String,
     val dataB64: String,
     val senderAddress: String // IP/Host of the incoming connection
 )
@@ -36,6 +37,7 @@ class LocalServer(
         private const val TAG = "LocalServer"
         private const val MAGIC_BYTE: Byte = 0x54 // 'T'
         private const val MAX_PAYLOAD_SIZE = 1 * 1024 * 1024 // Reduced to 1MB to prevent DoS (Audit 12)
+        private const val MAX_ONION_LENGTH = 128
         private const val MAX_CONCURRENT_CONNECTIONS = 5
     }
 
@@ -70,7 +72,8 @@ class LocalServer(
         activeConnections.incrementAndGet()
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                socket.soTimeout = 30000
+                // Initial short timeout for header to prevent slow-client DoS
+                socket.soTimeout = 5000
                 val dis = DataInputStream(socket.getInputStream())
 
                 // 1. Read Magic Byte
@@ -80,18 +83,35 @@ class LocalServer(
 
                 // 2. Read Version
                 val version = dis.readByte()
+                if (version != 0x01.toByte()) {
+                    return@launch
+                }
 
                 // 3. Read Type & Sequence
                 val type = dis.readByte()
                 val seq = dis.readInt()
 
-                // 4. Read Length
+                // 4. Read Sender Onion Length
+                val onionLen = dis.readInt()
+                if (onionLen <= 0 || onionLen > MAX_ONION_LENGTH) {
+                    return@launch
+                }
+
+                // Increase timeout for payload reading
+                socket.soTimeout = 30000
+
+                // 5. Read Sender Onion
+                val onionBytes = ByteArray(onionLen)
+                dis.readFully(onionBytes)
+                val senderOnion = String(onionBytes, Charsets.UTF_8)
+
+                // 6. Read Payload Length
                 val length = dis.readInt()
                 if (length <= 0 || length > MAX_PAYLOAD_SIZE) {
                     return@launch
                 }
 
-                // 5. Read Payload
+                // 7. Read Payload
                 val payloadBytes = ByteArray(length)
                 dis.readFully(payloadBytes)
 
@@ -102,6 +122,7 @@ class LocalServer(
                         version = version,
                         type = type,
                         sequenceNumber = seq,
+                        senderOnion = senderOnion,
                         dataB64 = data,
                         senderAddress = socket.inetAddress.hostAddress ?: "unknown"
                     )

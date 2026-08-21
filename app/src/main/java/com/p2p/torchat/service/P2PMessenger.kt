@@ -27,6 +27,7 @@ class P2PMessenger(
      * Sends an already encrypted payload over Tor.
      */
     suspend fun sendEncryptedPayload(
+        myOnion: String,
         recipientOnion: String,
         type: Byte,
         sequenceNumber: Int,
@@ -55,9 +56,14 @@ class P2PMessenger(
                 dos.writeByte(PROTOCOL_VERSION.toInt())
                 dos.writeByte(type.toInt())
                 dos.writeInt(sequenceNumber)
-                dos.writeInt(dataBytes.size)
 
-                // 2. Write Payload
+                // 2. Write Sender Onion
+                val myOnionBytes = myOnion.toByteArray(Charsets.UTF_8)
+                dos.writeInt(myOnionBytes.size)
+                dos.write(myOnionBytes)
+
+                // 3. Write Payload Length & Data
+                dos.writeInt(dataBytes.size)
                 dos.write(dataBytes)
                 dos.flush()
 

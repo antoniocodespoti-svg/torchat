@@ -7,9 +7,9 @@ import com.p2p.torchat.util.Constants
  * Implements KDF chain with skipped message keys support for out-of-order delivery.
  * Resolves REPLAY-001 and CRYPTO-003.
  */
-class SymmetricRatchetSession(initialRootKey: ByteArray) {
-    private var sendChainKey: ByteArray = initialRootKey
-    private var receiveChainKey: ByteArray = initialRootKey
+class SymmetricRatchetSession(initialSendKey: ByteArray, initialReceiveKey: ByteArray) {
+    private var sendChainKey: ByteArray = initialSendKey
+    private var receiveChainKey: ByteArray = initialReceiveKey
 
     var sendSequence: Int = 0
         private set
@@ -24,7 +24,7 @@ class SymmetricRatchetSession(initialRootKey: ByteArray) {
      * Advances the sending chain and returns a new Message Key.
      */
     fun nextSendKey(): ByteArray {
-        val result = E2EManager.kdfRatchet(sendChainKey, "send-chain-step")
+        val result = E2EManager.kdfRatchet(sendChainKey, "send")
         sendChainKey = result.first // Next Chain Key
         val messageKey = result.second
         sendSequence++
@@ -32,15 +32,20 @@ class SymmetricRatchetSession(initialRootKey: ByteArray) {
     }
 
     /**
-     * Advances the receiving chain to the specified sequence number.
-     * Returns the Message Key for that sequence, handling skips if necessary.
+     * Attempts to decrypt a message. Advances the ratchet only if decryption is successful.
+     * Resolves Audit Point 3.
      */
-    fun getReceiveKey(seqNum: Int): ByteArray {
+    fun tryDecrypt(
+        seqNum: Int,
+        encB64: String,
+        aad: ByteArray,
+        decryptFn: (String, ByteArray, ByteArray) -> String
+    ): String {
         // 1. Check if the key was already skipped and stored
-        skippedMessageKeys[seqNum]?.let {
-            val key = it
+        skippedMessageKeys[seqNum]?.let { key ->
+            val decrypted = decryptFn(encB64, key, aad)
             skippedMessageKeys.remove(seqNum)
-            return key
+            return decrypted
         }
 
         // 2. Prevent replay or extremely old messages
@@ -53,20 +58,33 @@ class SymmetricRatchetSession(initialRootKey: ByteArray) {
             throw SecurityException("Too many skipped messages: gap is ${seqNum - receiveSequence}")
         }
 
-        // 4. Advance the chain until we reach the target sequence
-        while (receiveSequence < seqNum) {
-            val result = E2EManager.kdfRatchet(receiveChainKey, "receive-chain-step")
-            receiveChainKey = result.first
-            skippedMessageKeys[receiveSequence] = result.second
-            receiveSequence++
+        // 4. Temporary state for potential rollback
+        var currentReceiveChainKey = receiveChainKey
+        var currentReceiveSequence = receiveSequence
+        val newSkipped = mutableMapOf<Int, ByteArray>()
+
+        // 5. Advance the chain until we reach the target sequence
+        while (currentReceiveSequence < seqNum) {
+            val result = E2EManager.kdfRatchet(currentReceiveChainKey, "receive")
+            currentReceiveChainKey = result.first
+            newSkipped[currentReceiveSequence] = result.second
+            currentReceiveSequence++
         }
 
-        // 5. Generate the key for the current sequence
-        val result = E2EManager.kdfRatchet(receiveChainKey, "receive-chain-step")
-        receiveChainKey = result.first
-        receiveSequence++
+        // 6. Generate the key for the current sequence
+        val result = E2EManager.kdfRatchet(currentReceiveChainKey, "receive")
+        val targetKey = result.second
+        val nextChainKey = result.first
 
-        return result.second
+        // 7. Try to decrypt before committing state
+        val decrypted = decryptFn(encB64, targetKey, aad)
+
+        // 8. Commitment: Update state only after successful decryption
+        receiveChainKey = nextChainKey
+        receiveSequence = currentReceiveSequence + 1
+        skippedMessageKeys.putAll(newSkipped)
+
+        return decrypted
     }
 
     /**

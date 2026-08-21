@@ -16,6 +16,7 @@ import javax.crypto.Cipher
 import javax.crypto.KeyAgreement
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
+import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
@@ -27,7 +28,7 @@ object E2EManager {
     private const val ANDROID_KEYSTORE = "AndroidKeyStore"
     private val argon2 by lazy { Argon2Kt() }
 
-    fun encryptWithHardwareKey(plainText: String): String {
+    fun encryptWithHardwareKey(plainText: String): Result<String> {
         return try {
             val secretKey = getOrCreateMasterKey()
             val cipher = Cipher.getInstance(Constants.AES_GCM_NOPADDING)
@@ -37,19 +38,40 @@ object E2EManager {
             val combined = ByteArray(iv.size + encryptedBytes.size)
             System.arraycopy(iv, 0, combined, 0, iv.size)
             System.arraycopy(encryptedBytes, 0, combined, iv.size, encryptedBytes.size)
-            Base64.getEncoder().encodeToString(combined)
-        } catch (e: Exception) { "" }
+            Result.success(Base64.getEncoder().encodeToString(combined))
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
     }
 
-    fun decryptWithHardwareKey(encB64: String): String {
+    fun decryptWithHardwareKey(encB64: String): Result<String> {
         return try {
             val combined = Base64.getDecoder().decode(encB64)
+            if (combined.size < Constants.GCM_IV_LENGTH) return Result.failure(IllegalArgumentException("Invalid encrypted data"))
             val iv = combined.sliceArray(0 until Constants.GCM_IV_LENGTH)
             val encryptedBytes = combined.sliceArray(Constants.GCM_IV_LENGTH until combined.size)
             val cipher = Cipher.getInstance(Constants.AES_GCM_NOPADDING)
             cipher.init(Cipher.DECRYPT_MODE, getOrCreateMasterKey(), GCMParameterSpec(Constants.GCM_TAG_LENGTH, iv))
-            String(cipher.doFinal(encryptedBytes), StandardCharsets.UTF_8)
-        } catch (e: Exception) { "" }
+            Result.success(String(cipher.doFinal(encryptedBytes), StandardCharsets.UTF_8))
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Checks if the master key is hardware-backed.
+     */
+    fun isHardwareBacked(): Boolean {
+        return try {
+            val ks = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+            val entry = ks.getEntry(Constants.KEY_MASTER_KEY_ALIAS, null) as? KeyStore.SecretKeyEntry
+            val key = entry?.secretKey ?: return false
+            val factory = SecretKeyFactory.getInstance(key.algorithm, ANDROID_KEYSTORE)
+            val keyInfo = factory.getKeySpec(key, android.security.keystore.KeyInfo::class.java) as android.security.keystore.KeyInfo
+            keyInfo.isInsideSecureHardware
+        } catch (e: Exception) {
+            false
+        }
     }
 
     private fun getOrCreateMasterKey(): SecretKey {
@@ -117,9 +139,30 @@ object E2EManager {
         return ka.generateSecret()
     }
 
-    fun kdfRatchet(key: ByteArray, info: String): Pair<ByteArray, ByteArray> {
-        val derived = HKDF.deriveKey(key, null, info.toByteArray(StandardCharsets.UTF_8), 64)
+    fun kdfRatchet(key: ByteArray, label: String): Pair<ByteArray, ByteArray> {
+        val derived = HKDF.deriveKey(key, null, "TorChat/v2/ratchet/$label".toByteArray(StandardCharsets.UTF_8), 64)
         return derived.sliceArray(0..31) to derived.sliceArray(32..63)
+    }
+
+    fun deriveInitialChainKeys(sharedSecret: ByteArray, myOnion: String, peerOnion: String): Pair<ByteArray, ByteArray> {
+        val infoSend = "TorChat/v2/chain/$myOnion->$peerOnion".toByteArray()
+        val infoReceive = "TorChat/v2/chain/$peerOnion->$myOnion".toByteArray()
+
+        val sendChain = HKDF.deriveKey(sharedSecret, null, infoSend, 32)
+        val receiveChain = HKDF.deriveKey(sharedSecret, null, infoReceive, 32)
+
+        return sendChain to receiveChain
+    }
+
+    fun buildHandshakeTranscript(
+        initiatorOnion: String,
+        responderOnion: String,
+        initiatorIK: String,
+        initiatorEK: String,
+        responderIK: String,
+        responderEK: String
+    ): ByteArray {
+        return "v2|handshake|$initiatorOnion|$responderOnion|$initiatorIK|$initiatorEK|$responderIK|$responderEK".toByteArray(StandardCharsets.UTF_8)
     }
 
     fun buildAAD(version: Byte, type: Byte, seq: Int, sender: String): ByteArray {
@@ -165,7 +208,10 @@ object E2EManager {
         return KeyFactory.getInstance(algo).generatePublic(X509EncodedKeySpec(kb))
     }
 
-    fun deriveKeyFromSecret(s: String): SecretKeySpec = SecretKeySpec(MessageDigest.getInstance(Constants.SHA256_ALGO).digest(s.toByteArray(StandardCharsets.UTF_8)), "AES")
+    fun deriveKeyFromSecret(s: String, salt: ByteArray): SecretKeySpec {
+        val derived = HKDF.deriveKey(s.toByteArray(StandardCharsets.UTF_8), salt, "TorChat/v2/storage/peer".toByteArray(), 32)
+        return SecretKeySpec(derived, "AES")
+    }
 
     fun encrypt(txt: String, sk: SecretKey): String {
         val iv = ByteArray(Constants.GCM_IV_LENGTH).apply { SecureRandom().nextBytes(this) }
