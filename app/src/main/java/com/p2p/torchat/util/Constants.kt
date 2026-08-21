@@ -41,4 +41,6 @@ object Constants {
     const val BIP39_WORD_COUNT = 12
     const val BIP39_ENTROPY_BITS = 128
     const val BIP39_CHECKSUM_BITS = 4
+
+    const val ONION_V3_REGEX = "^[a-z2-7]{56}\\.onion$"
 }

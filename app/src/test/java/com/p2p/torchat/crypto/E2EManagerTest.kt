@@ -6,7 +6,8 @@ import org.junit.Test
 class E2EManagerTest {
     @Test
     fun testEncryptionAndDecryption() {
-        val secretKey = E2EManager.deriveKeyFromSecret("TestSecretKey2026")
+        val salt = ByteArray(16)
+        val secretKey = E2EManager.deriveKeyFromSecret("TestSecretKey2026", salt)
         val originalMessage = "Ciao! Questo è un messaggio segreto P2P via Tor .onion!"
 
         val encryptedBase64 = E2EManager.encrypt(originalMessage, secretKey)
@@ -19,7 +20,8 @@ class E2EManagerTest {
 
     @Test(expected = Exception::class)
     fun testTamperedPayloadFailsDecryption() {
-        val secretKey = E2EManager.deriveKeyFromSecret("TestSecretKey2026")
+        val salt = ByteArray(16)
+        val secretKey = E2EManager.deriveKeyFromSecret("TestSecretKey2026", salt)
         val originalMessage = "Test Payload"
 
         val encryptedBase64 = E2EManager.encrypt(originalMessage, secretKey)

@@ -35,6 +35,9 @@ class P2PMessenger(
         timeoutMs: Int = 30000,
     ): Result<Boolean> {
         val cleanOnion = sanitizeOnion(recipientOnion)
+        if (!cleanOnion.matches(Regex(Constants.ONION_V3_REGEX))) {
+            return Result.failure(IllegalArgumentException("Invalid onion address: $cleanOnion"))
+        }
 
         // Add random jitter to obscure traffic patterns
         kotlinx.coroutines.delay(Random.nextLong(100, 500))

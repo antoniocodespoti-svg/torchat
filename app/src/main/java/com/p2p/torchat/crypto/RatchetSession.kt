@@ -1,6 +1,8 @@
 package com.p2p.torchat.crypto
 
 import com.p2p.torchat.util.Constants
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * Symmetric Ratchet Session.
@@ -8,6 +10,7 @@ import com.p2p.torchat.util.Constants
  * Resolves REPLAY-001 and CRYPTO-003.
  */
 class SymmetricRatchetSession(initialSendKey: ByteArray, initialReceiveKey: ByteArray) {
+    private val mutex = Mutex()
     private var sendChainKey: ByteArray = initialSendKey
     private var receiveChainKey: ByteArray = initialReceiveKey
 
@@ -23,34 +26,35 @@ class SymmetricRatchetSession(initialSendKey: ByteArray, initialReceiveKey: Byte
     /**
      * Advances the sending chain and returns a new Message Key.
      */
-    fun nextSendKey(): ByteArray {
-        val result = E2EManager.kdfRatchet(sendChainKey, "send")
+    suspend fun nextSendKey(): ByteArray = mutex.withLock {
+        val result = E2EManager.kdfRatchet(sendChainKey, "chain-step")
         sendChainKey = result.first // Next Chain Key
         val messageKey = result.second
         sendSequence++
-        return messageKey
+        return@withLock messageKey
     }
 
     /**
      * Attempts to decrypt a message. Advances the ratchet only if decryption is successful.
-     * Resolves Audit Point 3.
+     * Resolves Audit Point 3 and RATCHET-004 (thread-safety).
      */
-    fun tryDecrypt(
+    suspend fun tryDecrypt(
         seqNum: Int,
         encB64: String,
         aad: ByteArray,
         decryptFn: (String, ByteArray, ByteArray) -> String
-    ): String {
+    ): String = mutex.withLock {
         // 1. Check if the key was already skipped and stored
         skippedMessageKeys[seqNum]?.let { key ->
             val decrypted = decryptFn(encB64, key, aad)
             skippedMessageKeys.remove(seqNum)
-            return decrypted
+            return@withLock decrypted
         }
 
         // 2. Prevent replay or extremely old messages
-        if (seqNum < receiveSequence) {
-            throw SecurityException("Replay attack detected or message too old (seq: $seqNum)")
+        // If seqNum is 1, and receiveSequence is 0, it's valid.
+        if (seqNum <= receiveSequence) {
+            throw SecurityException("Replay attack detected or message too old (seq: $seqNum, current: $receiveSequence)")
         }
 
         // 3. Prevent DoS via large gaps
@@ -64,15 +68,18 @@ class SymmetricRatchetSession(initialSendKey: ByteArray, initialReceiveKey: Byte
         val newSkipped = mutableMapOf<Int, ByteArray>()
 
         // 5. Advance the chain until we reach the target sequence
-        while (currentReceiveSequence < seqNum) {
-            val result = E2EManager.kdfRatchet(currentReceiveChainKey, "receive")
+        // Example: seqNum=1, currentReceiveSequence=0. Loop doesn't run.
+        // Example: seqNum=5, currentReceiveSequence=0. Loop runs for seq 1, 2, 3, 4.
+        while (currentReceiveSequence < seqNum - 1) {
+            val result = E2EManager.kdfRatchet(currentReceiveChainKey, "chain-step")
             currentReceiveChainKey = result.first
-            newSkipped[currentReceiveSequence] = result.second
+            val messageKey = result.second
             currentReceiveSequence++
+            newSkipped[currentReceiveSequence] = messageKey
         }
 
         // 6. Generate the key for the current sequence
-        val result = E2EManager.kdfRatchet(currentReceiveChainKey, "receive")
+        val result = E2EManager.kdfRatchet(currentReceiveChainKey, "chain-step")
         val targetKey = result.second
         val nextChainKey = result.first
 
@@ -81,10 +88,10 @@ class SymmetricRatchetSession(initialSendKey: ByteArray, initialReceiveKey: Byte
 
         // 8. Commitment: Update state only after successful decryption
         receiveChainKey = nextChainKey
-        receiveSequence = currentReceiveSequence + 1
+        receiveSequence = seqNum
         skippedMessageKeys.putAll(newSkipped)
 
-        return decrypted
+        return@withLock decrypted
     }
 
     /**

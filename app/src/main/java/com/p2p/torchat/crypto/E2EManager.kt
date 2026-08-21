@@ -162,7 +162,24 @@ object E2EManager {
         responderIK: String,
         responderEK: String
     ): ByteArray {
-        return "v2|handshake|$initiatorOnion|$responderOnion|$initiatorIK|$initiatorEK|$responderIK|$responderEK".toByteArray(StandardCharsets.UTF_8)
+        val iO = initiatorOnion.toByteArray(StandardCharsets.UTF_8)
+        val rO = responderOnion.toByteArray(StandardCharsets.UTF_8)
+        val iIK = initiatorIK.toByteArray(StandardCharsets.UTF_8)
+        val iEK = initiatorEK.toByteArray(StandardCharsets.UTF_8)
+        val rIK = responderIK.toByteArray(StandardCharsets.UTF_8)
+        val rEK = responderEK.toByteArray(StandardCharsets.UTF_8)
+
+        val totalSize = 4 + iO.size + 4 + rO.size + 4 + iIK.size + 4 + iEK.size + 4 + rIK.size + 4 + rEK.size + 8 // + "v2/hand"
+        val buffer = ByteBuffer.allocate(totalSize)
+        buffer.put("v2/hand".toByteArray(StandardCharsets.UTF_8))
+        buffer.putInt(iO.size); buffer.put(iO)
+        buffer.putInt(rO.size); buffer.put(rO)
+        buffer.putInt(iIK.size); buffer.put(iIK)
+        buffer.putInt(iEK.size); buffer.put(iEK)
+        buffer.putInt(rIK.size); buffer.put(rIK)
+        buffer.putInt(rEK.size); buffer.put(rEK)
+
+        return buffer.array()
     }
 
     fun buildAAD(version: Byte, type: Byte, seq: Int, sender: String): ByteArray {

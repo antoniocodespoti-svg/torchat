@@ -29,7 +29,8 @@ class ChatRepository(
         val myOnion = (torManager.torState.value as? TorState.Running)?.onionAddress ?: return Result.failure(Exception("Tor not running"))
 
         val messageKey = session.nextSendKey()
-        val aad = E2EManager.buildAAD(1, PayloadType.CHAT_MESSAGE.ordinal.toByte(), session.sendSequence, myOnion)
+        val seq = session.sendSequence
+        val aad = E2EManager.buildAAD(1, PayloadType.CHAT_MESSAGE.ordinal.toByte(), seq, myOnion)
         val encrypted = E2EManager.encryptV2(content, messageKey, aad)
 
         val msg = Message(
@@ -40,10 +41,10 @@ class ChatRepository(
             timestamp = System.currentTimeMillis(),
             isOutgoing = true,
             type = PayloadType.CHAT_MESSAGE,
-            sequenceNumber = session.sendSequence
+            sequenceNumber = seq
         )
 
-        val res = p2pMessenger.sendEncryptedPayload(myOnion, peer.onionAddress, PayloadType.CHAT_MESSAGE.ordinal.toByte(), session.sendSequence, encrypted)
+        val res = p2pMessenger.sendEncryptedPayload(myOnion, peer.onionAddress, PayloadType.CHAT_MESSAGE.ordinal.toByte(), seq, encrypted)
 
         return if (res.isSuccess) {
             Result.success(msg.copy(isDelivered = true))

@@ -105,6 +105,10 @@ class LocalServer(
                 dis.readFully(onionBytes)
                 val senderOnion = String(onionBytes, Charsets.UTF_8)
 
+                if (!senderOnion.matches(Regex(Constants.ONION_V3_REGEX))) {
+                    return@launch
+                }
+
                 // 6. Read Payload Length
                 val length = dis.readInt()
                 if (length <= 0 || length > MAX_PAYLOAD_SIZE) {

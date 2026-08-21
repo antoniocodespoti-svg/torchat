@@ -348,14 +348,30 @@ class MainActivity : ComponentActivity() {
 
     private fun sendMessage(peer: Peer, content: String, messageList: MutableList<Message>) {
         val session = activeSessions[peer.onionAddress] ?: return
-        val messageKey = session.nextSendKey(); val myOnion = (torManager.torState.value as? TorState.Running)?.onionAddress ?: ""
-        val aad = E2EManager.buildAAD(1, PayloadType.CHAT_MESSAGE.ordinal.toByte(), session.sendSequence, myOnion)
-        val encrypted = E2EManager.encryptV2(content, messageKey, aad)
-        val msg = Message(UUID.randomUUID().toString(), myOnion, peer.onionAddress, content, System.currentTimeMillis(), true, false, false, PayloadType.CHAT_MESSAGE, null, session.sendSequence)
-        messageList.add(msg)
+        val myOnion = (torManager.torState.value as? TorState.Running)?.onionAddress ?: ""
+
         CoroutineScope(Dispatchers.IO).launch {
-            val res = p2pMessenger.sendEncryptedPayload(myOnion, peer.onionAddress, PayloadType.CHAT_MESSAGE.ordinal.toByte(), session.sendSequence, encrypted)
-            withContext(Dispatchers.Main) { val idx = messageList.indexOf(msg); if (idx != -1) messageList[idx] = msg.copy(isDelivered = res.isSuccess, isError = !res.isSuccess) }
+            try {
+                val messageKey = session.nextSendKey()
+                val seq = session.sendSequence
+                val aad = E2EManager.buildAAD(1, PayloadType.CHAT_MESSAGE.ordinal.toByte(), seq, myOnion)
+                val encrypted = E2EManager.encryptV2(content, messageKey, aad)
+
+                withContext(Dispatchers.Main) {
+                    val msg = Message(UUID.randomUUID().toString(), myOnion, peer.onionAddress, content, System.currentTimeMillis(), true, false, false, PayloadType.CHAT_MESSAGE, null, seq)
+                    messageList.add(msg)
+
+                    CoroutineScope(Dispatchers.IO).launch {
+                        val res = p2pMessenger.sendEncryptedPayload(myOnion, peer.onionAddress, PayloadType.CHAT_MESSAGE.ordinal.toByte(), seq, encrypted)
+                        withContext(Dispatchers.Main) {
+                            val idx = messageList.indexOfFirst { it.id == msg.id }
+                            if (idx != -1) messageList[idx] = messageList[idx].copy(isDelivered = res.isSuccess, isError = !res.isSuccess)
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Send message error", e)
+            }
         }
     }
 

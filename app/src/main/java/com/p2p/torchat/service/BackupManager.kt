@@ -5,6 +5,7 @@ import com.google.gson.Gson
 import com.p2p.torchat.crypto.E2EManager
 import com.p2p.torchat.crypto.MnemonicManager
 import com.p2p.torchat.model.Peer
+import java.security.SecureRandom
 import java.util.Base64
 
 /**
@@ -87,7 +88,7 @@ class BackupManager(private val context: Context) {
         val d = p.getString("saved_peers", null) ?: return emptyList()
         return try {
             val h = p.getString("app_password_hash", null)
-            val json = if (h != null) E2EManager.decrypt(d, E2EManager.deriveKeyFromSecret(h)) else d
+            val json = if (h != null) E2EManager.decrypt(d, E2EManager.deriveKeyFromSecret(h, getInstallSalt())) else d
             gson.fromJson(json, object : com.google.gson.reflect.TypeToken<List<Peer>>() {}.type)
         } catch (e: Exception) {
             emptyList()
@@ -97,6 +98,23 @@ class BackupManager(private val context: Context) {
     private fun serializePeers(peers: List<Peer>): String {
         val json = gson.toJson(peers)
         val h = context.getSharedPreferences("tor_chat_prefs", Context.MODE_PRIVATE).getString("app_password_hash", null)
-        return if (h != null) E2EManager.encrypt(json, E2EManager.deriveKeyFromSecret(h)) else json
+        return if (h != null) E2EManager.encrypt(json, E2EManager.deriveKeyFromSecret(h, getInstallSalt())) else json
+    }
+
+    private fun getInstallSalt(): ByteArray {
+        val p = context.getSharedPreferences("secure_prefs_salt", Context.MODE_PRIVATE)
+        val sEnc = p.getString("install_salt_enc", null) ?: return generateAndSaveSalt(p)
+        return try {
+            Base64.getDecoder().decode(E2EManager.decryptWithHardwareKey(sEnc).getOrThrow())
+        } catch (e: Exception) {
+            generateAndSaveSalt(p)
+        }
+    }
+
+    private fun generateAndSaveSalt(p: android.content.SharedPreferences): ByteArray {
+        val s = ByteArray(16).apply { SecureRandom().nextBytes(this) }
+        val enc = E2EManager.encryptWithHardwareKey(Base64.getEncoder().encodeToString(s)).getOrNull() ?: ""
+        p.edit().putString("install_salt_enc", enc).apply()
+        return s
     }
 }
