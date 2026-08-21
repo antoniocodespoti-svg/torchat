@@ -60,8 +60,10 @@ class MainActivity : ComponentActivity() {
     private var myIdentityKeyPair: KeyPair? = null
     private val activeSessions = mutableStateMapOf<String, SymmetricRatchetSession>()
     private val handshakeLoading = mutableStateMapOf<String, Boolean>()
-    private val pendingEphemeralKeys = mutableMapOf<String, KeyPair>()
-    private val pendingNonces = mutableMapOf<String, ByteArray>()
+
+    // Keyed by HandshakeId (Initiator Nonce B64)
+    private val pendingHandshakes = mutableMapOf<String, PendingHandshake>()
+    private val HANDSHAKE_TIMEOUT_MS = 60000L
 
     private val peersList = mutableStateListOf<Peer>()
     private val messagesMap = mutableStateMapOf<String, MutableList<Message>>()
@@ -265,74 +267,130 @@ class MainActivity : ComponentActivity() {
             val p = Gson().fromJson(json, NetworkPayload::class.java)
             val pts = p.payloadData.split("|")
 
-            val peerEKStr = pts[0]
-            val peerSig = Base64.getDecoder().decode(pts[1])
-            val peerIKStr = pts[2]
+            if (pts.isEmpty()) return
+            val tag = pts.last()
 
-            val existing = peersList.find { it.onionAddress == senderOnion } ?: return
-            val peerIdentityKey = E2EManager.stringToPublicKey(peerIKStr, Constants.ED25519_ALGO)
-            if (existing.identityPublicKey.isNotEmpty() && existing.identityPublicKey != peerIKStr) return
+            when (tag) {
+                "PFS_INIT" -> {
+                    if (pts.size != 4) return
+                    val peerEKStr = pts[0]
+                    val peerIKStr = pts[1]
+                    val peerNonce = Base64.getDecoder().decode(pts[2])
+                    if (peerNonce.size != 16) return
 
-            if (pts.last() == "PFS") {
-                if (pts.size < 5) return
-                val peerNonce = Base64.getDecoder().decode(pts[3])
+                    val peerIdentityKey = E2EManager.stringToPublicKey(peerIKStr, Constants.ED25519_ALGO)
+                    val existing = peersList.find { it.onionAddress == senderOnion } ?: return
+                    if (existing.identityPublicKey.isNotEmpty() && existing.identityPublicKey != peerIKStr) return
 
-                // We are Bob (Responder)
-                val myNonce = ByteArray(16).apply { SecureRandom().nextBytes(this) }
-                val myIKStr = E2EManager.publicKeyToString(myIdentityKeyPair!!.public)
+                    // Bob (Responder) - Step 2
+                    val myNonce = ByteArray(16).apply { SecureRandom().nextBytes(this) }
+                    val respKeyPair = E2EManager.generateEphemeralKeyPair()
+                    val respEKStr = E2EManager.publicKeyToString(respKeyPair.public)
+                    val myIKStr = E2EManager.publicKeyToString(myIdentityKeyPair!!.public)
 
-                // Bob verifies Alice's transcript: (AliceOnion, BobOnion, AliceIK, AliceEK, BobIK, BobEK="", AliceNonce, BobNonce="")
-                val aliceTranscript = E2EManager.buildHandshakeTranscript(senderOnion, myOnion, peerIKStr, peerEKStr, myIKStr, "", peerNonce, ByteArray(0))
-                if (!E2EManager.verifySignature(aliceTranscript, peerSig, peerIdentityKey)) return
+                    // Transcript Bob signs: (SenderOnion=Alice, MyOnion=Bob, ikA, eA, ikB, eB, nA, nB)
+                    val fullTranscript = E2EManager.buildHandshakeTranscript(senderOnion, myOnion, peerIKStr, peerEKStr, myIKStr, respEKStr, peerNonce, myNonce)
+                    val bobSig = Base64.getEncoder().encodeToString(E2EManager.signData(fullTranscript, myIdentityKeyPair!!.private))
 
-                val respKeyPair = E2EManager.generateEphemeralKeyPair()
-                val respEKStr = E2EManager.publicKeyToString(respKeyPair.public)
+                    // Store pending handshake indexed by Alice's nonce
+                    val handshakeId = Base64.getEncoder().encodeToString(peerNonce)
+                    pendingHandshakes[handshakeId] = PendingHandshake(senderOnion, respKeyPair, myNonce, peerNonce, peerIKStr, peerEKStr)
 
-                // Bob signs full transcript: (AliceOnion, BobOnion, AliceIK, AliceEK, BobIK, BobEK, AliceNonce, BobNonce)
-                val fullTranscript = E2EManager.buildHandshakeTranscript(senderOnion, myOnion, peerIKStr, peerEKStr, myIKStr, respEKStr, peerNonce, myNonce)
-                val respSig = Base64.getEncoder().encodeToString(E2EManager.signData(fullTranscript, myIdentityKeyPair!!.private))
+                    val respData = "$respEKStr|$bobSig|$myIKStr|${Base64.getEncoder().encodeToString(peerNonce)}|${Base64.getEncoder().encodeToString(myNonce)}|PFS_ACCEPT"
+                    val respEnc = Base64.getEncoder().encodeToString(Gson().toJson(NetworkPayload(
+                        type = PayloadType.SESSION_HANDSHAKE,
+                        senderOnion = myOnion,
+                        recipientOnion = senderOnion,
+                        payloadData = respData
+                    )).toByteArray(Charsets.UTF_8))
 
-                val nonceAStr = Base64.getEncoder().encodeToString(peerNonce)
-                val nonceBStr = Base64.getEncoder().encodeToString(myNonce)
-                val respData = "$respEKStr|$respSig|$myIKStr|$nonceAStr|$nonceBStr|PFS_RESP"
-                val respEnc = Base64.getEncoder().encodeToString(Gson().toJson(NetworkPayload(
-                    type = PayloadType.SESSION_HANDSHAKE,
-                    senderOnion = myOnion,
-                    recipientOnion = senderOnion,
-                    payloadData = respData
-                )).toByteArray(Charsets.UTF_8))
-
-                CoroutineScope(Dispatchers.IO).launch {
-                    p2pMessenger.sendEncryptedPayload(myOnion, senderOnion, PayloadType.SESSION_HANDSHAKE.ordinal.toByte(), 0, respEnc, timeoutMs = 30000)
+                    CoroutineScope(Dispatchers.IO).launch {
+                        p2pMessenger.sendEncryptedPayload(myOnion, senderOnion, PayloadType.SESSION_HANDSHAKE.ordinal.toByte(), 0, respEnc, timeoutMs = 30000)
+                    }
                 }
 
-                val sharedSecret = E2EManager.calculateSharedSecret(respKeyPair.private, E2EManager.stringToPublicKey(peerEKStr, Constants.X25519_ALGO))
-                val (send, receive) = E2EManager.deriveInitialChainKeys(sharedSecret, myOnion, senderOnion)
-                val sid = E2EManager.calculateSessionId(fullTranscript)
-                activeSessions[senderOnion] = SymmetricRatchetSession(sid, send, receive)
+                "PFS_ACCEPT" -> {
+                    if (pts.size != 6) return
+                    val peerEKStr = pts[0]
+                    val peerSig = Base64.getDecoder().decode(pts[1])
+                    val peerIKStr = pts[2]
+                    val nonceAStr = pts[3]
+                    val peerNonce = Base64.getDecoder().decode(pts[4])
+                    if (peerNonce.size != 16) return
 
-            } else if (pts.last() == "PFS_RESP") {
-                if (pts.size < 6) return
-                val myEphemeral = pendingEphemeralKeys.remove(senderOnion) ?: return
-                val myNonce = pendingNonces.remove(senderOnion) ?: return
+                    val pending = pendingHandshakes.remove(nonceAStr) ?: return
+                    if (System.currentTimeMillis() - pending.createdAt > HANDSHAKE_TIMEOUT_MS) return
 
-                val nonceAFromPeer = Base64.getDecoder().decode(pts[3])
-                val peerNonce = Base64.getDecoder().decode(pts[4])
+                    val myEphemeral = pending.myEphemeralKeys
+                    val myNonce = pending.myNonce
+                    val myIKStr = E2EManager.publicKeyToString(myIdentityKeyPair!!.public)
 
-                // Verify it's actually our nonce replayed back
-                if (!myNonce.contentEquals(nonceAFromPeer)) return
+                    val peerIdentityKey = E2EManager.stringToPublicKey(peerIKStr, Constants.ED25519_ALGO)
+                    val existing = peersList.find { it.onionAddress == senderOnion } ?: return
+                    if (existing.identityPublicKey.isNotEmpty() && existing.identityPublicKey != peerIKStr) return
 
-                val myIKStr = E2EManager.publicKeyToString(myIdentityKeyPair!!.public)
-                val fullTranscript = E2EManager.buildHandshakeTranscript(myOnion, senderOnion, myIKStr, E2EManager.publicKeyToString(myEphemeral.public), peerIKStr, peerEKStr, myNonce, peerNonce)
+                    // Alice (Initiator) verifies Bob's signature
+                    val fullTranscript = E2EManager.buildHandshakeTranscript(myOnion, senderOnion, myIKStr, E2EManager.publicKeyToString(myEphemeral.public), peerIKStr, peerEKStr, myNonce, peerNonce)
+                    if (!E2EManager.verifySignature(fullTranscript, peerSig, peerIdentityKey)) return
 
-                if (!E2EManager.verifySignature(fullTranscript, peerSig, peerIdentityKey)) return
+                    // Alice signs same transcript - Step 3
+                    val aliceSig = Base64.getEncoder().encodeToString(E2EManager.signData(fullTranscript, myIdentityKeyPair!!.private))
+                    val finalData = "$aliceSig|${Base64.getEncoder().encodeToString(myNonce)}|${Base64.getEncoder().encodeToString(peerNonce)}|PFS_FINAL"
+                    val finalEnc = Base64.getEncoder().encodeToString(Gson().toJson(NetworkPayload(
+                        type = PayloadType.SESSION_HANDSHAKE,
+                        senderOnion = myOnion,
+                        recipientOnion = senderOnion,
+                        payloadData = finalData
+                    )).toByteArray(Charsets.UTF_8))
 
-                val sharedSecret = E2EManager.calculateSharedSecret(myEphemeral.private, E2EManager.stringToPublicKey(peerEKStr, Constants.X25519_ALGO))
-                val (send, receive) = E2EManager.deriveInitialChainKeys(sharedSecret, myOnion, senderOnion)
-                val sid = E2EManager.calculateSessionId(fullTranscript)
-                activeSessions[senderOnion] = SymmetricRatchetSession(sid, send, receive)
+                    CoroutineScope(Dispatchers.IO).launch {
+                        p2pMessenger.sendEncryptedPayload(myOnion, senderOnion, PayloadType.SESSION_HANDSHAKE.ordinal.toByte(), 0, finalEnc, timeoutMs = 30000)
+                    }
+
+                    // Commit Session Alice
+                    val sharedSecret = E2EManager.calculateSharedSecret(myEphemeral.private, E2EManager.stringToPublicKey(peerEKStr, Constants.X25519_ALGO))
+                    val (send, receive) = E2EManager.deriveInitialChainKeys(sharedSecret, myOnion, senderOnion)
+                    val sid = E2EManager.calculateSessionId(fullTranscript)
+                    activeSessions[senderOnion] = SymmetricRatchetSession(sid, send, receive)
+                    handshakeLoading[senderOnion] = false
+                }
+
+                "PFS_FINAL" -> {
+                    if (pts.size != 4) return
+                    val aliceSig = Base64.getDecoder().decode(pts[0])
+                    val nonceAStr = pts[1] // This is Alice's nonce
+                    val nonceBStr = pts[2] // This is Bob's nonce
+
+                    val pending = pendingHandshakes.remove(nonceAStr) ?: return
+                    if (System.currentTimeMillis() - pending.createdAt > HANDSHAKE_TIMEOUT_MS) return
+
+                    val myNonce = pending.myNonce // Bob's nonce
+                    val myEphemeral = pending.myEphemeralKeys
+                    val peerNonce = pending.peerNonce ?: return // Alice's nonce
+                    val peerIKStr = pending.peerIdentityKeyStr ?: return
+                    val peerEKStr = pending.peerEphemeralKeyStr ?: return
+
+                    if (Base64.getEncoder().encodeToString(myNonce) != nonceBStr) return
+
+                    val peerIdentityKey = E2EManager.stringToPublicKey(peerIKStr, Constants.ED25519_ALGO)
+                    val myIKStr = E2EManager.publicKeyToString(myIdentityKeyPair!!.public)
+
+                    // Bob Reconstructs transcript: (SenderOnion=Alice, MyOnion=Bob, ikA, eA, ikB, eB, nA, nB)
+                    val fullTranscript = E2EManager.buildHandshakeTranscript(senderOnion, myOnion, peerIKStr, peerEKStr, myIKStr, E2EManager.publicKeyToString(myEphemeral.public), peerNonce, myNonce)
+
+                    if (!E2EManager.verifySignature(fullTranscript, aliceSig, peerIdentityKey)) {
+                        Log.e(TAG, "Alice final signature verification failed")
+                        return
+                    }
+
+                    // Commit Session Bob
+                    val sharedSecret = E2EManager.calculateSharedSecret(myEphemeral.private, E2EManager.stringToPublicKey(peerEKStr, Constants.X25519_ALGO))
+                    val (send, receive) = E2EManager.deriveInitialChainKeys(sharedSecret, myOnion, senderOnion)
+                    val sid = E2EManager.calculateSessionId(fullTranscript)
+                    activeSessions[senderOnion] = SymmetricRatchetSession(sid, send, receive)
+                    Log.i(TAG, "Session established with $senderOnion (Responder side)")
+                }
             }
-            handshakeLoading[senderOnion] = false
         } catch (e: Exception) { Log.e(TAG, "Handshake error", e) }
     }
 
@@ -414,27 +472,22 @@ class MainActivity : ComponentActivity() {
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 val myEphemeralKeyPair = E2EManager.generateEphemeralKeyPair()
-                pendingEphemeralKeys[p.onionAddress] = myEphemeralKeyPair
-
                 val myNonce = ByteArray(16).apply { SecureRandom().nextBytes(this) }
-                pendingNonces[p.onionAddress] = myNonce
 
                 val eKStr = E2EManager.publicKeyToString(myEphemeralKeyPair.public)
                 val myIKStr = E2EManager.publicKeyToString(myIdentityKeyPair!!.public)
+                val nonceAStr = Base64.getEncoder().encodeToString(myNonce)
 
-                // Alice signs (initiator_onion, responder_onion, initiator_IK, initiator_EK, responder_IK, responder_EK="", initiator_Nonce, responder_Nonce="")
-                val transcript = E2EManager.buildHandshakeTranscript(myOnion, p.onionAddress, myIKStr, eKStr, p.identityPublicKey, "", myNonce, ByteArray(0))
-                val sig = Base64.getEncoder().encodeToString(E2EManager.signData(transcript, myIdentityKeyPair!!.private))
+                // Alice stores pending handshake keyed by her own nonce
+                pendingHandshakes[nonceAStr] = PendingHandshake(p.onionAddress, myEphemeralKeyPair, myNonce)
 
-                val nonceStr = Base64.getEncoder().encodeToString(myNonce)
-                val data = "$eKStr|$sig|$myIKStr|$nonceStr|PFS"
+                val data = "$eKStr|$myIKStr|$nonceAStr|PFS_INIT"
                 val encryptedJson = Base64.getEncoder().encodeToString(Gson().toJson(NetworkPayload(type = PayloadType.SESSION_HANDSHAKE, senderOnion = myOnion, recipientOnion = p.onionAddress, payloadData = data)).toByteArray(Charsets.UTF_8))
                 p2pMessenger.sendEncryptedPayload(myOnion, p.onionAddress, PayloadType.SESSION_HANDSHAKE.ordinal.toByte(), 0, encryptedJson, timeoutMs = 30000)
             } catch (e: Exception) {
-                pendingEphemeralKeys.remove(p.onionAddress)
-                pendingNonces.remove(p.onionAddress)
+                // Remove on failure
             } finally {
-                handshakeLoading[p.onionAddress] = false
+                // Note: handshakeLoading[p.onionAddress] remains true until PFS_ACCEPT is received or timeout
             }
         }
     }

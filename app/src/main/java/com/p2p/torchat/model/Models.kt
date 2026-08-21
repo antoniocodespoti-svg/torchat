@@ -64,3 +64,13 @@ data class NetworkPayload(
     val sequenceNumber: Int = 0,
     val sessionId: String = "",
 )
+
+data class PendingHandshake(
+    val peerOnion: String,
+    val myEphemeralKeys: java.security.KeyPair,
+    val myNonce: ByteArray,
+    val peerNonce: ByteArray? = null,
+    val peerIdentityKeyStr: String? = null,
+    val peerEphemeralKeyStr: String? = null,
+    val createdAt: Long = System.currentTimeMillis()
+)

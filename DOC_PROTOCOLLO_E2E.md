@@ -1,84 +1,51 @@
-# Specifica Protocollo TorChat E2EE (v2.3)
+# Specifica Protocollo TorChat E2EE (v2.4)
 
 Questo documento descrive il protocollo di crittografia end-to-end utilizzato da TorChat per la comunicazione sicura tra peer su rete Tor.
 
-## 1. Handshake e Scambio Chiavi
+## 1. Handshake e Scambio Chiavi (3-Way Exchange)
 
-TorChat utilizza un meccanismo di handshake basato su chiavi effimere X25519 e firme di identità Ed25519. La versione 2.3 introduce **Handshake Nonces** per garantire la freshness e prevenire attacchi di replay dell'intero handshake.
+La versione 2.4 introduce un **Handshake a 3 vie** con challenge del risponditore per prevenire attacchi di replay e session replacement.
 
 ### Fasi dell'Handshake:
-1.  **Iniziatore (Alice)**:
+1.  **Iniziatore (Alice) - PFS_INIT**:
     *   Genera una coppia di chiavi effimere X25519 (`eA_pub`, `eA_priv`) e un **nonce casuale** (`nA`) di 16 byte.
-    *   Crea un **Handshake Transcript** binario canonico (length-prefixed) contenente:
-        *   `initiator_onion`, `responder_onion`
-        *   `initiator_identity_key`, `initiator_ephemeral_key`
-        *   `responder_identity_key`, `responder_ephemeral_key` (vuote)
-        *   `initiator_nonce` (`nA`), `responder_nonce` (vuoto)
-    *   Firma il transcript con la propria chiave di identità Ed25519.
-    *   Invia (`eA_pub`, firma, `identity_key_A`, `nA`) a Bob.
+    *   Invia (`eA_pub`, `identity_key_A`, `nA`) a Bob.
+    *   Alice memorizza lo stato in `pendingHandshakes` indicizzato da `nA`.
 
-2.  **Risponditore (Bob)**:
+2.  **Risponditore (Bob) - PFS_ACCEPT**:
     *   Riceve il pacchetto di Alice.
-    *   Ricostruisce il transcript (usando `nA`) e verifica la firma Ed25519.
-    *   Verifica l'identità di Alice (TOFU).
-    *   Genera la propria coppia effimera X25519 (`eB_pub`, `eB_priv`) e un proprio **nonce** (`nB`).
-    *   Crea e firma il **Transcript Completo** (includendo entrambi i nonce e le chiavi).
-    *   Calcola il **Shared Secret** tramite X25519 ECDH: `ECDH(eB_priv, eA_pub)`.
-    *   Deriva il **Session ID**: `SHA256(Transcript Completo)`.
-    *   Invia (`eB_pub`, firma, `identity_key_B`, `nA`, `nB`) ad Alice.
+    *   Genera la propria coppia effimera X25519 (`eB_pub`, `eB_priv`) e un proprio **nonce challenge** (`nB`).
+    *   Crea un **Handshake Transcript** binario canonico contenente le identità, le chiavi effimere e i nonce di entrambi.
+    *   Firma il transcript con la propria chiave di identità Ed25519.
+    *   Invia (`eB_pub`, firma_Bob, `identity_key_B`, `nA_echo`, `nB`) ad Alice.
+    *   Bob memorizza lo stato (incluse le chiavi di Alice) in `pendingHandshakes` indicizzato da `nA`. **Non crea ancora la sessione attiva**.
 
-3.  **Finalizzazione (Alice)**:
-    *   Verifica che `nA` restituito sia corretto.
-    *   Verifica la firma di Bob sul Transcript Completo.
-    *   Calcola lo stesso **Shared Secret** e lo stesso **Session ID**.
+3.  **Iniziatore (Alice) - PFS_FINAL**:
+    *   Riceve `PFS_ACCEPT`.
+    *   Verifica la firma di Bob sul transcript ricostruito.
+    *   Firma lo stesso transcript con la propria chiave di identità Ed25519.
+    *   Invia (firma_Alice, `nA_echo`, `nB_echo`) a Bob.
+    *   Alice calcola il **Shared Secret**, deriva il **Session ID** e imposta la sessione come **ATTIVA**.
+
+4.  **Finalizzazione (Bob)**:
+    *   Riceve `PFS_FINAL`.
+    *   Verifica la firma di Alice sul transcript memorizzato.
+    *   Bob calcola il **Shared Secret**, deriva il **Session ID** e imposta la sessione come **ATTIVA**.
 
 ## 2. Derivazione delle Chain Key (Split Ratchet)
 
 Alice e Bob derivano due catene di chiavi simmetriche distinte utilizzando HKDF-SHA256 con etichette direzionali.
 
-*   `Chain_A_to_B = HKDF(SharedSecret, salt=null, info="TorChat/v2/chain/OnionA->OnionB", len=32)`
-*   `Chain_B_to_A = HKDF(SharedSecret, salt=null, info="TorChat/v2/chain/OnionB->OnionA", len=32)`
-
-Alice imposta: `sendChain = Chain_A_to_B`, `receiveChain = Chain_B_to_A`.
-Bob imposta: `sendChain = Chain_B_to_A`, `receiveChain = Chain_A_to_B`.
-
 ## 3. Symmetric Split Ratchet
 
-Ogni messaggio avanza la catena simmetrica. Il ratchet garantisce che la compromissione di una chiave di messaggio non comprometta i messaggi passati (**Forward Secrecy** all'interno della sessione).
+Ogni messaggio avanza la catena simmetrica. Il ratchet garantisce la **Forward Secrecy** all'interno della sessione.
 
-> [!NOTE]
-> Il protocollo non fornisce attualmente *Post-Compromise Security* in quanto non implementa un DH ratchet periodico. Se la Chain Key viene compromessa, i messaggi futuri della stessa sessione sono vulnerabili finché non viene eseguito un nuovo handshake.
+### Session Binding e AAD (v2.3+):
+Ogni pacchetto è legato crittograficamente alla sessione tramite il **Session ID** (SHA256 del Transcript completo) incluso nei dati autenticati addizionali (AAD).
 
-### Session Binding e AAD (v2.3):
-Ogni pacchetto è legato crittograficamente alla sessione tramite il **Session ID** incluso nei dati autenticati addizionali (AAD).
+## 4. Protezioni di Sicurezza
 
-### Gestione Concorrenza e Atomicità:
-*   **Atomicità Key/Sequence**: L'invio di un messaggio recupera la chiave e il numero di sequenza in un'unica operazione atomica (sotto Mutex).
-*   **Avanzamento Atomico**: Lo stato del ratchet di ricezione viene aggiornato **solo dopo** che la decifratura del messaggio ha avuto successo (validazione del tag GCM).
-
-## 4. Cifratura dei Messaggi (AES-256-GCM)
-
-*   **Algoritmo**: AES/GCM/NoPadding.
-*   **AAD (Additional Authenticated Data)**:
-    *   `version` (1 byte)
-    *   `payload_type` (1 byte)
-    *   `sequence_number` (4 byte)
-    *   `sender_onion` (stringa UTF-8)
-    *   `session_id` (stringa Base64)
-
-## 5. Framing Binario e Protezione Network
-
-I pacchetti sono inviati in formato binario:
-1.  `MAGIC_BYTE` (1 byte, 0x54)
-2.  `VERSION` (1 byte, 0x01)
-3.  `TYPE` (1 byte)
-4.  `SEQUENCE` (4 byte)
-5.  `SENDER_ONION_LENGTH` (4 byte)
-6.  `SENDER_ONION` (variabile)
-7.  `PAYLOAD_LENGTH` (4 byte)
-8.  `PAYLOAD` (Base64 dell'IV + Ciphertext + Tag)
-
-### Misure Anti-DoS:
-*   Timeout di 5 secondi per gli header binari.
-*   Dimensione massima del payload: 1 MB.
-*   Validazione rigorosa dell'indirizzo `.onion` del mittente tramite Regex.
+*   **Handshake Replay Protection**: Il risponditore (Bob) verifica la liveness dell'iniziatore tramite il 3rd step (firma di Alice sul nonce di Bob).
+*   **Atomic State Updates**: Il ratchet avanza solo dopo una decifratura GCM avvenuta con successo.
+*   **Onion Validation**: Tutti gli indirizzi .onion sono validati tramite Regex prima di ogni operazione.
+*   **DoS Mitigation**: Limiti di dimensione payload (1MB), timeout rigorosi e gestione dei messaggi saltati (max 100).
