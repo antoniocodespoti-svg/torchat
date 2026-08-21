@@ -352,10 +352,10 @@ class MainActivity : ComponentActivity() {
 
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                val messageKey = session.nextSendKey()
-                val seq = session.sendSequence
+                val sendResult = session.nextSendKey()
+                val seq = sendResult.sequence
                 val aad = E2EManager.buildAAD(1, PayloadType.CHAT_MESSAGE.ordinal.toByte(), seq, myOnion)
-                val encrypted = E2EManager.encryptV2(content, messageKey, aad)
+                val encrypted = E2EManager.encryptV2(content, sendResult.key, aad)
 
                 withContext(Dispatchers.Main) {
                     val msg = Message(UUID.randomUUID().toString(), myOnion, peer.onionAddress, content, System.currentTimeMillis(), true, false, false, PayloadType.CHAT_MESSAGE, null, seq)

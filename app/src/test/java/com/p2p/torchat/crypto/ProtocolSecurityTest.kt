@@ -1,5 +1,7 @@
 package com.p2p.torchat.crypto
 
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
 import org.junit.Test
@@ -53,19 +55,19 @@ class ProtocolSecurityTest {
 
             // 5. Exchange Messages
             val msg1 = "Hello Bob!"
-            val k1 = aliceSession.nextSendKey()
-            val aad1 = E2EManager.buildAAD(1, 0, 1, aliceOnion)
-            val enc1 = E2EManager.encryptV2(msg1, k1, aad1)
+            val send1 = aliceSession.nextSendKey()
+            val aad1 = E2EManager.buildAAD(1, 0, send1.sequence, aliceOnion)
+            val enc1 = E2EManager.encryptV2(msg1, send1.key, aad1)
 
-            val dec1 = bobSession.tryDecrypt(1, enc1, aad1) { e, k, a -> E2EManager.decryptV2(e, k, a) }
+            val dec1 = bobSession.tryDecrypt(send1.sequence, enc1, aad1) { e, k, a -> E2EManager.decryptV2(e, k, a) }
             assertEquals(msg1, dec1)
 
             val msg2 = "Hi Alice!"
-            val k2 = bobSession.nextSendKey()
-            val aad2 = E2EManager.buildAAD(1, 0, 1, bobOnion)
-            val enc2 = E2EManager.encryptV2(msg2, k2, aad2)
+            val send2 = bobSession.nextSendKey()
+            val aad2 = E2EManager.buildAAD(1, 0, send2.sequence, bobOnion)
+            val enc2 = E2EManager.encryptV2(msg2, send2.key, aad2)
 
-            val dec2 = aliceSession.tryDecrypt(1, enc2, aad2) { e, k, a -> E2EManager.decryptV2(e, k, a) }
+            val dec2 = aliceSession.tryDecrypt(send2.sequence, enc2, aad2) { e, k, a -> E2EManager.decryptV2(e, k, a) }
             assertEquals(msg2, dec2)
         }
     }
@@ -74,27 +76,32 @@ class ProtocolSecurityTest {
     fun testOutOrOrderAndSkippedKeys() {
         runBlocking {
             val aliceOnion = "alice777777777777777777777777777777777777777777777777777.onion"
-            val shared = ByteArray(32) { 0x42.toByte() }
+            val bobOnion = "bob8888888888888888888888888888888888888888888888888888.onion"
+            val sharedSecret = ByteArray(32) { 0x42.toByte() }
 
-            val aliceSession = SymmetricRatchetSession(shared, shared)
-            val bobSession = SymmetricRatchetSession(shared, shared)
+            // Proper directional keys for consistency
+            val (aliceSend, aliceReceive) = E2EManager.deriveInitialChainKeys(sharedSecret, aliceOnion, bobOnion)
+            val (bobSend, bobReceive) = E2EManager.deriveInitialChainKeys(sharedSecret, bobOnion, aliceOnion)
+
+            val aliceSession = SymmetricRatchetSession(aliceSend, aliceReceive)
+            val bobSession = SymmetricRatchetSession(bobSend, bobReceive)
 
             // Alice sends 3 messages
-            val m1 = "Msg 1"; val c1 = E2EManager.encryptV2(m1, aliceSession.nextSendKey(), E2EManager.buildAAD(1, 0, 1, aliceOnion))
-            val m2 = "Msg 2"; val c2 = E2EManager.encryptV2(m2, aliceSession.nextSendKey(), E2EManager.buildAAD(1, 0, 2, aliceOnion))
-            val m3 = "Msg 3"; val c3 = E2EManager.encryptV2(m3, aliceSession.nextSendKey(), E2EManager.buildAAD(1, 0, 3, aliceOnion))
+            val m1 = "Msg 1"; val s1 = aliceSession.nextSendKey(); val c1 = E2EManager.encryptV2(m1, s1.key, E2EManager.buildAAD(1, 0, s1.sequence, aliceOnion))
+            val m2 = "Msg 2"; val s2 = aliceSession.nextSendKey(); val c2 = E2EManager.encryptV2(m2, s2.key, E2EManager.buildAAD(1, 0, s2.sequence, aliceOnion))
+            val m3 = "Msg 3"; val s3 = aliceSession.nextSendKey(); val c3 = E2EManager.encryptV2(m3, s3.key, E2EManager.buildAAD(1, 0, s3.sequence, aliceOnion))
 
             // Bob receives Msg 3 first (out of order)
-            val dec3 = bobSession.tryDecrypt(3, c3, E2EManager.buildAAD(1, 0, 3, aliceOnion)) { e, k, a -> E2EManager.decryptV2(e, k, a) }
+            val dec3 = bobSession.tryDecrypt(s3.sequence, c3, E2EManager.buildAAD(1, 0, s3.sequence, aliceOnion)) { e, k, a -> E2EManager.decryptV2(e, k, a) }
             assertEquals(m3, dec3)
             assertEquals(3, bobSession.receiveSequence)
 
             // Bob receives Msg 1 (skipped)
-            val dec1 = bobSession.tryDecrypt(1, c1, E2EManager.buildAAD(1, 0, 1, aliceOnion)) { e, k, a -> E2EManager.decryptV2(e, k, a) }
+            val dec1 = bobSession.tryDecrypt(s1.sequence, c1, E2EManager.buildAAD(1, 0, s1.sequence, aliceOnion)) { e, k, a -> E2EManager.decryptV2(e, k, a) }
             assertEquals(m1, dec1)
 
             // Bob receives Msg 2 (skipped)
-            val dec2 = bobSession.tryDecrypt(2, c2, E2EManager.buildAAD(1, 0, 2, aliceOnion)) { e, k, a -> E2EManager.decryptV2(e, k, a) }
+            val dec2 = bobSession.tryDecrypt(s2.sequence, c2, E2EManager.buildAAD(1, 0, s2.sequence, aliceOnion)) { e, k, a -> E2EManager.decryptV2(e, k, a) }
             assertEquals(m2, dec2)
         }
     }
@@ -103,17 +110,66 @@ class ProtocolSecurityTest {
     fun testReplayAttack() {
         runBlocking {
             val aliceOnion = "alice777777777777777777777777777777777777777777777777777.onion"
-            val shared = ByteArray(32) { 0x42.toByte() }
-            val aliceSession = SymmetricRatchetSession(shared, shared)
-            val bobSession = SymmetricRatchetSession(shared, shared)
+            val bobOnion = "bob8888888888888888888888888888888888888888888888888888.onion"
+            val sharedSecret = ByteArray(32) { 0x42.toByte() }
 
-            val m1 = "Msg 1"; val c1 = E2EManager.encryptV2(m1, aliceSession.nextSendKey(), E2EManager.buildAAD(1, 0, 1, aliceOnion))
+            val (aliceSend, aliceReceive) = E2EManager.deriveInitialChainKeys(sharedSecret, aliceOnion, bobOnion)
+            val (bobSend, bobReceive) = E2EManager.deriveInitialChainKeys(sharedSecret, bobOnion, aliceOnion)
+
+            val aliceSession = SymmetricRatchetSession(aliceSend, aliceReceive)
+            val bobSession = SymmetricRatchetSession(bobSend, bobReceive)
+
+            val m1 = "Msg 1"; val s1 = aliceSession.nextSendKey(); val c1 = E2EManager.encryptV2(m1, s1.key, E2EManager.buildAAD(1, 0, s1.sequence, aliceOnion))
 
             // Success 1st time
-            bobSession.tryDecrypt(1, c1, E2EManager.buildAAD(1, 0, 1, aliceOnion)) { e, k, a -> E2EManager.decryptV2(e, k, a) }
+            bobSession.tryDecrypt(s1.sequence, c1, E2EManager.buildAAD(1, 0, s1.sequence, aliceOnion)) { e, k, a -> E2EManager.decryptV2(e, k, a) }
 
             // Replay should fail
-            bobSession.tryDecrypt(1, c1, E2EManager.buildAAD(1, 0, 1, aliceOnion)) { e, k, a -> E2EManager.decryptV2(e, k, a) }
+            bobSession.tryDecrypt(s1.sequence, c1, E2EManager.buildAAD(1, 0, s1.sequence, aliceOnion)) { e, k, a -> E2EManager.decryptV2(e, k, a) }
+        }
+    }
+
+    @Test
+    fun testConcurrentSendsAndReceives() {
+        runBlocking {
+            val aliceOnion = "alice777777777777777777777777777777777777777777777777777.onion"
+            val bobOnion = "bob8888888888888888888888888888888888888888888888888888.onion"
+            val sharedSecret = ByteArray(32) { 0x42.toByte() }
+
+            val (aliceSend, aliceReceive) = E2EManager.deriveInitialChainKeys(sharedSecret, aliceOnion, bobOnion)
+            val (bobSend, bobReceive) = E2EManager.deriveInitialChainKeys(sharedSecret, bobOnion, aliceOnion)
+
+            val aliceSession = SymmetricRatchetSession(aliceSend, aliceReceive)
+            val bobSession = SymmetricRatchetSession(bobSend, bobReceive)
+
+            val messageCount = 100
+
+            // Concurrent Send
+            val ciphertexts = (1..messageCount).map { i ->
+                async {
+                    val content = "Message $i"
+                    val sendResult = aliceSession.nextSendKey()
+                    val aad = E2EManager.buildAAD(1, 0, sendResult.sequence, aliceOnion)
+                    val enc = E2EManager.encryptV2(content, sendResult.key, aad)
+                    Triple(sendResult.sequence, enc, aad)
+                }
+            }.awaitAll()
+
+            // Verify sequences are unique and from 1 to 100
+            val sequences = ciphertexts.map { it.first }.sorted()
+            assertEquals(messageCount, sequences.size)
+            assertEquals(1, sequences.first())
+            assertEquals(messageCount, sequences.last())
+
+            // Concurrent Receive (random order)
+            val results = ciphertexts.shuffled().map { (seq, enc, aad) ->
+                async {
+                    bobSession.tryDecrypt(seq, enc, aad) { e, k, a -> E2EManager.decryptV2(e, k, a) }
+                }
+            }.awaitAll()
+
+            assertEquals(messageCount, results.size)
+            results.forEach { msg -> assertTrue(msg.startsWith("Message ")) }
         }
     }
 

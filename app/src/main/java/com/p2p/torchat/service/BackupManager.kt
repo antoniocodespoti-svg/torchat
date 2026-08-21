@@ -107,7 +107,8 @@ class BackupManager(private val context: Context) {
         return try {
             Base64.getDecoder().decode(E2EManager.decryptWithHardwareKey(sEnc).getOrThrow())
         } catch (e: Exception) {
-            generateAndSaveSalt(p)
+            // Resolves Audit Point 11: Decrypt failure -> HARD ERROR, not silent regeneration.
+            throw IllegalStateException("Failed to decrypt storage salt. Local data may be inaccessible.", e)
         }
     }
 

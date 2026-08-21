@@ -19,19 +19,22 @@ class SymmetricRatchetSession(initialSendKey: ByteArray, initialReceiveKey: Byte
     var receiveSequence: Int = 0
         private set
 
+    data class SendKey(val key: ByteArray, val sequence: Int)
+
     // Keys skipped due to out-of-order delivery
     private val skippedMessageKeys = mutableMapOf<Int, ByteArray>()
     private val maxSkipDuration = 100 // Maximum number of messages that can be skipped
 
     /**
-     * Advances the sending chain and returns a new Message Key.
+     * Advances the sending chain and returns a new Message Key and its sequence number.
+     * Resolves RATCHET-003 (atomic key/sequence pair).
      */
-    suspend fun nextSendKey(): ByteArray = mutex.withLock {
+    suspend fun nextSendKey(): SendKey = mutex.withLock {
         val result = E2EManager.kdfRatchet(sendChainKey, "chain-step")
         sendChainKey = result.first // Next Chain Key
         val messageKey = result.second
         sendSequence++
-        return@withLock messageKey
+        return@withLock SendKey(messageKey, sendSequence)
     }
 
     /**
