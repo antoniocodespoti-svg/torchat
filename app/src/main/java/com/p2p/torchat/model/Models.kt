@@ -72,5 +72,5 @@ data class PendingHandshake(
     val peerNonce: ByteArray? = null,
     val peerIdentityKeyStr: String? = null,
     val peerEphemeralKeyStr: String? = null,
-    val createdAt: Long = System.currentTimeMillis()
+    val createdAt: Long
 )

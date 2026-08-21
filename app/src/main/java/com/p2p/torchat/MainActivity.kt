@@ -61,9 +61,7 @@ class MainActivity : ComponentActivity() {
     private val activeSessions = mutableStateMapOf<String, SymmetricRatchetSession>()
     private val handshakeLoading = mutableStateMapOf<String, Boolean>()
 
-    // Keyed by HandshakeId (Initiator Nonce B64)
-    private val pendingHandshakes = mutableMapOf<String, PendingHandshake>()
-    private val HANDSHAKE_TIMEOUT_MS = 60000L
+    private val handshakeManager = HandshakeManager()
 
     private val peersList = mutableStateListOf<Peer>()
     private val messagesMap = mutableStateMapOf<String, MutableList<Message>>()
@@ -272,15 +270,23 @@ class MainActivity : ComponentActivity() {
 
             when (tag) {
                 "PFS_INIT" -> {
-                    if (pts.size != 4) return
+                    if (pts.size != 5) return
                     val peerEKStr = pts[0]
                     val peerIKStr = pts[1]
                     val peerNonce = Base64.getDecoder().decode(pts[2])
+                    val initSig = Base64.getDecoder().decode(pts[3])
                     if (peerNonce.size != 16) return
 
                     val peerIdentityKey = E2EManager.stringToPublicKey(peerIKStr, Constants.ED25519_ALGO)
                     val existing = peersList.find { it.onionAddress == senderOnion } ?: return
                     if (existing.identityPublicKey.isNotEmpty() && existing.identityPublicKey != peerIKStr) return
+
+                    // Verify PFS_INIT Signature (Resolves Audit Point 7)
+                    val initTranscript = E2EManager.buildInitTranscript(senderOnion, myOnion, peerIKStr, peerEKStr, peerNonce)
+                    if (!E2EManager.verifySignature(initTranscript, initSig, peerIdentityKey)) {
+                        Log.w(TAG, "Invalid PFS_INIT signature from $senderOnion")
+                        return
+                    }
 
                     // Bob (Responder) - Step 2
                     val myNonce = ByteArray(16).apply { SecureRandom().nextBytes(this) }
@@ -294,7 +300,11 @@ class MainActivity : ComponentActivity() {
 
                     // Store pending handshake indexed by Alice's nonce
                     val handshakeId = Base64.getEncoder().encodeToString(peerNonce)
-                    pendingHandshakes[handshakeId] = PendingHandshake(senderOnion, respKeyPair, myNonce, peerNonce, peerIKStr, peerEKStr)
+                    val pending = PendingHandshake(senderOnion, respKeyPair, myNonce, peerNonce, peerIKStr, peerEKStr, handshakeManager.getCurrentTime())
+                    if (!handshakeManager.addPending(handshakeId, pending)) {
+                        Log.w(TAG, "Dropped handshake request from $senderOnion (DoS protection)")
+                        return
+                    }
 
                     val respData = "$respEKStr|$bobSig|$myIKStr|${Base64.getEncoder().encodeToString(peerNonce)}|${Base64.getEncoder().encodeToString(myNonce)}|PFS_ACCEPT"
                     val respEnc = Base64.getEncoder().encodeToString(Gson().toJson(NetworkPayload(
@@ -318,9 +328,7 @@ class MainActivity : ComponentActivity() {
                     val peerNonce = Base64.getDecoder().decode(pts[4])
                     if (peerNonce.size != 16) return
 
-                    val pending = pendingHandshakes.remove(nonceAStr) ?: return
-                    if (System.currentTimeMillis() - pending.createdAt > HANDSHAKE_TIMEOUT_MS) return
-
+                    val pending = handshakeManager.getAndRemove(nonceAStr) ?: return
                     val myEphemeral = pending.myEphemeralKeys
                     val myNonce = pending.myNonce
                     val myIKStr = E2EManager.publicKeyToString(myIdentityKeyPair!!.public)
@@ -361,9 +369,7 @@ class MainActivity : ComponentActivity() {
                     val nonceAStr = pts[1] // This is Alice's nonce
                     val nonceBStr = pts[2] // This is Bob's nonce
 
-                    val pending = pendingHandshakes.remove(nonceAStr) ?: return
-                    if (System.currentTimeMillis() - pending.createdAt > HANDSHAKE_TIMEOUT_MS) return
-
+                    val pending = handshakeManager.getAndRemove(nonceAStr) ?: return
                     val myNonce = pending.myNonce // Bob's nonce
                     val myEphemeral = pending.myEphemeralKeys
                     val peerNonce = pending.peerNonce ?: return // Alice's nonce
@@ -478,10 +484,15 @@ class MainActivity : ComponentActivity() {
                 val myIKStr = E2EManager.publicKeyToString(myIdentityKeyPair!!.public)
                 val nonceAStr = Base64.getEncoder().encodeToString(myNonce)
 
-                // Alice stores pending handshake keyed by her own nonce
-                pendingHandshakes[nonceAStr] = PendingHandshake(p.onionAddress, myEphemeralKeyPair, myNonce)
+                // Alice signs PFS_INIT (Resolves Audit Point 7)
+                val initTranscript = E2EManager.buildInitTranscript(myOnion, p.onionAddress, myIKStr, eKStr, myNonce)
+                val aliceInitSig = Base64.getEncoder().encodeToString(E2EManager.signData(initTranscript, myIdentityKeyPair!!.private))
 
-                val data = "$eKStr|$myIKStr|$nonceAStr|PFS_INIT"
+                // Alice stores pending handshake keyed by her own nonce
+                val pending = PendingHandshake(p.onionAddress, myEphemeralKeyPair, myNonce, null, null, null, handshakeManager.getCurrentTime())
+                handshakeManager.addPending(nonceAStr, pending)
+
+                val data = "$eKStr|$myIKStr|$nonceAStr|$aliceInitSig|PFS_INIT"
                 val encryptedJson = Base64.getEncoder().encodeToString(Gson().toJson(NetworkPayload(type = PayloadType.SESSION_HANDSHAKE, senderOnion = myOnion, recipientOnion = p.onionAddress, payloadData = data)).toByteArray(Charsets.UTF_8))
                 p2pMessenger.sendEncryptedPayload(myOnion, p.onionAddress, PayloadType.SESSION_HANDSHAKE.ordinal.toByte(), 0, encryptedJson, timeoutMs = 30000)
             } catch (e: Exception) {

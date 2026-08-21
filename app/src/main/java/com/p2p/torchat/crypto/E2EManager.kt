@@ -187,6 +187,35 @@ object E2EManager {
         return buffer.array()
     }
 
+    /**
+     * Transcript for the first message (PFS_INIT) authentication.
+     * Resolves Audit Point 7 (PFS_INIT authentication).
+     */
+    fun buildInitTranscript(
+        initiatorOnion: String,
+        responderOnion: String,
+        initiatorIK: String,
+        initiatorEK: String,
+        initiatorNonce: ByteArray
+    ): ByteArray {
+        val domain = "v2/init".toByteArray(StandardCharsets.UTF_8)
+        val iO = initiatorOnion.toByteArray(StandardCharsets.UTF_8)
+        val rO = responderOnion.toByteArray(StandardCharsets.UTF_8)
+        val iIK = initiatorIK.toByteArray(StandardCharsets.UTF_8)
+        val iEK = initiatorEK.toByteArray(StandardCharsets.UTF_8)
+
+        val totalSize = domain.size + 4 + iO.size + 4 + rO.size + 4 + iIK.size + 4 + iEK.size + 4 + initiatorNonce.size
+        val buffer = ByteBuffer.allocate(totalSize)
+        buffer.put(domain)
+        buffer.putInt(iO.size); buffer.put(iO)
+        buffer.putInt(rO.size); buffer.put(rO)
+        buffer.putInt(iIK.size); buffer.put(iIK)
+        buffer.putInt(iEK.size); buffer.put(iEK)
+        buffer.putInt(initiatorNonce.size); buffer.put(initiatorNonce)
+
+        return buffer.array()
+    }
+
     fun calculateSessionId(transcript: ByteArray): String {
         val hash = MessageDigest.getInstance(Constants.SHA256_ALGO).digest(transcript)
         return Base64.getEncoder().encodeToString(hash)
