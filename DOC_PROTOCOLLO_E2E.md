@@ -1,10 +1,10 @@
-# Specifica Protocollo TorChat E2EE (v2.4.1)
+# Specifica Protocollo TorChat E2EE (v2.4.2)
 
 Questo documento descrive il protocollo di crittografia end-to-end utilizzato da TorChat per la comunicazione sicura tra peer su rete Tor.
 
 ## 1. Handshake e Scambio Chiavi (3-Way Authenticated Exchange)
 
-La versione 2.4.1 introduce l'autenticazione del primo messaggio (`PFS_INIT`) e protezioni anti-DoS lato risponditore.
+La versione 2.4.2 consolida l'**Handshake a 3 vie** con protezioni atomiche anti-DoS.
 
 ### Fasi dell'Handshake:
 1.  **Iniziatore (Alice) - PFS_INIT**:
@@ -33,8 +33,9 @@ La versione 2.4.1 introduce l'autenticazione del primo messaggio (`PFS_INIT`) e 
     *   Verifica la firma finale di Alice sul transcript memorizzato.
     *   Bob attiva la sessione.
 
-### Protezioni DoS (v2.4.1):
-*   **Limiti Handshake**: Massimo 3 handshake pendenti per peer e 50 totali a livello globale.
+### Protezioni DoS (v2.4.2):
+*   **Limiti Handshake Atomici**: Massimo 3 handshake pendenti per peer e 50 totali a livello globale. L'enforcement dei limiti è atomico (thread-safe) per prevenire bypass tramite richieste concorrenti.
+*   **Anti-Overwrite**: Non è possibile sovrascrivere un handshake pendente con lo stesso nonce, prevenendo attacchi di reset della sessione durante l'handshake.
 *   **Clock Monotonico**: Cleanup degli handshake scaduti (TTL 60s) basato su clock di sistema non alterabile dall'utente.
 *   **Autenticazione Precoce**: Il risponditore scarta richieste non firmate o non valide al primo step senza allocare risorse pesanti.
 
@@ -42,16 +43,21 @@ La versione 2.4.1 introduce l'autenticazione del primo messaggio (`PFS_INIT`) e 
 
 Alice e Bob derivano due catene di chiavi simmetriche distinte utilizzando HKDF-SHA256 con etichette direzionali.
 
+*   `Chain_A_to_B = HKDF(SharedSecret, salt=null, info="TorChat/v2/chain/OnionA->OnionB", len=32)`
+*   `Chain_B_to_A = HKDF(SharedSecret, salt=null, info="TorChat/v2/chain/OnionB->OnionA", len=32)`
+
 ## 3. Symmetric Split Ratchet
 
 Ogni messaggio avanza la catena simmetrica. Il ratchet garantisce la **Forward Secrecy** all'interno della sessione.
 
-### Session Binding e AAD (v2.3+):
+> [!NOTE]
+> Il protocollo non fornisce attualmente *Post-Compromise Security* in quanto non implementa un DH ratchet periodico.
+
+### Session Binding e AAD:
 Ogni pacchetto è legato crittograficamente alla sessione tramite il **Session ID** (SHA256 del Transcript completo) incluso nei dati autenticati addizionali (AAD).
 
 ## 4. Protezioni di Sicurezza
 
-*   **Handshake Replay Protection**: Il risponditore (Bob) verifica la liveness dell'iniziatore tramite il 3rd step (firma di Alice sul nonce di Bob).
+*   **Handshake Replay Protection**: Il risponditore (Bob) verifica la liveness dell'iniziatore tramite il 3rd step.
 *   **Atomic State Updates**: Il ratchet avanza solo dopo una decifratura GCM avvenuta con successo.
 *   **Onion Validation**: Tutti gli indirizzi .onion sono validati tramite Regex prima di ogni operazione.
-*   **DoS Mitigation**: Limiti di dimensione payload (1MB), timeout rigorosi e gestione dei messaggi saltati (max 100).

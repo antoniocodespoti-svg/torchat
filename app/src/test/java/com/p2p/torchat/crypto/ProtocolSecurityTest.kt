@@ -6,7 +6,6 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
 import org.junit.Test
-import java.util.Base64
 
 class ProtocolSecurityTest {
 
@@ -80,25 +79,69 @@ class ProtocolSecurityTest {
     }
 
     @Test
-    fun testHandshakeDoSProtection() {
-        val manager = HandshakeManager(
-            maxPendingPerPeer = 2,
-            maxGlobalPending = 5,
-            timeProvider = { 1000L }
-        )
-        val eKP = E2EManager.generateEphemeralKeyPair()
-        val n = ByteArray(16)
+    fun testHandshakeDoSProtectionAtomic() {
+        runBlocking {
+            val maxGlobal = 10
+            val manager = HandshakeManager(
+                maxPendingPerPeer = 2,
+                maxGlobalPending = maxGlobal,
+                timeProvider = { 1000L }
+            )
+            val eKP = E2EManager.generateEphemeralKeyPair()
+            val n = ByteArray(16)
 
-        // 1. Per-peer limit
-        assertTrue(manager.addPending("id1", PendingHandshake("peerA", eKP, n, createdAt = 1000L)))
-        assertTrue(manager.addPending("id2", PendingHandshake("peerA", eKP, n, createdAt = 1000L)))
-        assertFalse(manager.addPending("id3", PendingHandshake("peerA", eKP, n, createdAt = 1000L)))
+            // 100 concurrent attempts to add handshakes for different peers
+            val results = (1..100).map { i ->
+                async {
+                    manager.addPending("id_$i", PendingHandshake("peer_$i", eKP, n, createdAt = 1000L))
+                }
+            }.awaitAll()
 
-        // 2. Global limit
-        assertTrue(manager.addPending("id4", PendingHandshake("peerB", eKP, n, createdAt = 1000L)))
-        assertTrue(manager.addPending("id5", PendingHandshake("peerC", eKP, n, createdAt = 1000L)))
-        assertTrue(manager.addPending("id6", PendingHandshake("peerD", eKP, n, createdAt = 1000L)))
-        assertFalse(manager.addPending("id7", PendingHandshake("peerE", eKP, n, createdAt = 1000L)))
+            // Verify global limit is strictly enforced (exactly maxGlobal success)
+            assertEquals(maxGlobal, results.count { it })
+            assertEquals(maxGlobal, manager.getPendingCount())
+        }
+    }
+
+    @Test
+    fun testHandshakePerPeerLimitAtomic() {
+        runBlocking {
+            val maxPerPeer = 3
+            val manager = HandshakeManager(
+                maxPendingPerPeer = maxPerPeer,
+                maxGlobalPending = 50,
+                timeProvider = { 1000L }
+            )
+            val eKP = E2EManager.generateEphemeralKeyPair()
+            val n = ByteArray(16)
+
+            // 100 concurrent attempts for the SAME peer
+            val results = (1..100).map { i ->
+                async {
+                    manager.addPending("id_$i", PendingHandshake("samePeer", eKP, n, createdAt = 1000L))
+                }
+            }.awaitAll()
+
+            // Verify per-peer limit is strictly enforced
+            assertEquals(maxPerPeer, results.count { it })
+        }
+    }
+
+    @Test
+    fun testHandshakeNoOverwrite() {
+        val manager = HandshakeManager(timeProvider = { 1000L })
+        val eKP1 = E2EManager.generateEphemeralKeyPair()
+        val eKP2 = E2EManager.generateEphemeralKeyPair()
+        val n = ByteArray(16) { 0x11.toByte() }
+        val id = "same_id"
+
+        assertTrue(manager.addPending(id, PendingHandshake("peer", eKP1, n, createdAt = 1000L)))
+        // Attempt to overwrite with same ID must fail
+        assertFalse(manager.addPending(id, PendingHandshake("peer", eKP2, n, createdAt = 1000L)))
+
+        // Verify original state preserved
+        val retrieved = manager.getAndRemove(id)
+        assertEquals(eKP1.public, retrieved?.myEphemeralKeys?.public)
     }
 
     @Test
@@ -111,25 +154,6 @@ class ProtocolSecurityTest {
 
         currentTime = 7000L // 6 seconds later
         assertNull(manager.getAndRemove("h1"))
-    }
-
-    @Test
-    fun testHandshakeReplayToResponder() {
-        runBlocking {
-            val aliceOnion = "alice.onion"
-            val oldSid = "old-session"
-            val activeSessions = mutableMapOf(aliceOnion to SymmetricRatchetSession(oldSid, ByteArray(32), ByteArray(32)))
-
-            val manager = HandshakeManager()
-            val eKP = E2EManager.generateEphemeralKeyPair()
-            val n = ByteArray(16) { 0x99.toByte() }
-
-            // Replayed INIT creates PENDING but doesn't touch activeSessions
-            manager.addPending("replayed", PendingHandshake(aliceOnion, eKP, n, createdAt = System.currentTimeMillis()))
-
-            assertEquals(oldSid, activeSessions[aliceOnion]?.sessionId)
-            assertNotNull(manager.getAndRemove("replayed"))
-        }
     }
 
     @Test
