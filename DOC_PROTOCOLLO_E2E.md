@@ -1,34 +1,40 @@
-# Specifica Protocollo TorChat E2EE (v2.2)
+# Specifica Protocollo TorChat E2EE (v2.3)
 
 Questo documento descrive il protocollo di crittografia end-to-end utilizzato da TorChat per la comunicazione sicura tra peer su rete Tor.
 
 ## 1. Handshake e Scambio Chiavi
 
-TorChat utilizza un meccanismo di handshake basato su chiavi effimere X25519 e firme di identità Ed25519 per garantire l'autenticità e la segretezza dei messaggi futuri (forward secrecy per le sessioni).
+TorChat utilizza un meccanismo di handshake basato su chiavi effimere X25519 e firme di identità Ed25519. La versione 2.3 introduce **Handshake Nonces** per garantire la freshness e prevenire attacchi di replay dell'intero handshake.
 
 ### Fasi dell'Handshake:
 1.  **Iniziatore (Alice)**:
-    *   Genera una coppia di chiavi effimere X25519 (`eA_pub`, `eA_priv`).
-    *   Crea un **Handshake Transcript** binario canonico (length-prefixed) contenente le identità e le chiavi effimere note.
+    *   Genera una coppia di chiavi effimere X25519 (`eA_pub`, `eA_priv`) e un **nonce casuale** (`nA`) di 16 byte.
+    *   Crea un **Handshake Transcript** binario canonico (length-prefixed) contenente:
+        *   `initiator_onion`, `responder_onion`
+        *   `initiator_identity_key`, `initiator_ephemeral_key`
+        *   `responder_identity_key`, `responder_ephemeral_key` (vuote)
+        *   `initiator_nonce` (`nA`), `responder_nonce` (vuoto)
     *   Firma il transcript con la propria chiave di identità Ed25519.
-    *   Invia (`eA_pub`, firma, `identity_key_A`) a Bob.
+    *   Invia (`eA_pub`, firma, `identity_key_A`, `nA`) a Bob.
 
 2.  **Risponditore (Bob)**:
     *   Riceve il pacchetto di Alice.
-    *   Ricostruisce e verifica la firma Ed25519 sul transcript.
+    *   Ricostruisce il transcript (usando `nA`) e verifica la firma Ed25519.
     *   Verifica l'identità di Alice (TOFU).
-    *   Genera la propria coppia effimera X25519 (`eB_pub`, `eB_priv`).
-    *   Crea e firma il proprio transcript completo.
-    *   Calcola il **Shared Secret** tramite X25519 Diffie-Hellman: `ECDH(eB_priv, eA_pub)`.
-    *   Invia (`eB_pub`, firma, `identity_key_B`) ad Alice.
+    *   Genera la propria coppia effimera X25519 (`eB_pub`, `eB_priv`) e un proprio **nonce** (`nB`).
+    *   Crea e firma il **Transcript Completo** (includendo entrambi i nonce e le chiavi).
+    *   Calcola il **Shared Secret** tramite X25519 ECDH: `ECDH(eB_priv, eA_pub)`.
+    *   Deriva il **Session ID**: `SHA256(Transcript Completo)`.
+    *   Invia (`eB_pub`, firma, `identity_key_B`, `nA`, `nB`) ad Alice.
 
 3.  **Finalizzazione (Alice)**:
-    *   Verifica la firma di Bob sul transcript completo.
-    *   Calcola lo stesso **Shared Secret**: `ECDH(eA_priv, eB_pub)`.
+    *   Verifica che `nA` restituito sia corretto.
+    *   Verifica la firma di Bob sul Transcript Completo.
+    *   Calcola lo stesso **Shared Secret** e lo stesso **Session ID**.
 
 ## 2. Derivazione delle Chain Key (Split Ratchet)
 
-Per evitare problemi di simmetria e collisioni di sequenza, Alice e Bob derivano due catene di chiavi simmetriche distinte utilizzando HKDF-SHA256 con etichette direzionali basate sugli indirizzi Onion.
+Alice e Bob derivano due catene di chiavi simmetriche distinte utilizzando HKDF-SHA256 con etichette direzionali.
 
 *   `Chain_A_to_B = HKDF(SharedSecret, salt=null, info="TorChat/v2/chain/OnionA->OnionB", len=32)`
 *   `Chain_B_to_A = HKDF(SharedSecret, salt=null, info="TorChat/v2/chain/OnionB->OnionA", len=32)`
@@ -38,26 +44,27 @@ Bob imposta: `sendChain = Chain_B_to_A`, `receiveChain = Chain_A_to_B`.
 
 ## 3. Symmetric Split Ratchet
 
-Ogni messaggio avanza la catena simmetrica. Il ratchet garantisce che la compromissione di una chiave di messaggio non comprometta i messaggi passati (Forward Secrecy all'interno della sessione).
+Ogni messaggio avanza la catena simmetrica. Il ratchet garantisce che la compromissione di una chiave di messaggio non comprometta i messaggi passati (**Forward Secrecy** all'interno della sessione).
 
-*   `KDF_Step(ChainKey, label) -> (NextChainKey, MessageKey)`
-*   Utilizza HKDF-SHA256 con info: `"TorChat/v2/ratchet/" + label`.
+> [!NOTE]
+> Il protocollo non fornisce attualmente *Post-Compromise Security* in quanto non implementa un DH ratchet periodico. Se la Chain Key viene compromessa, i messaggi futuri della stessa sessione sono vulnerabili finché non viene eseguito un nuovo handshake.
 
-### Gestione Concorrenza e Atomicità (v2.2):
-*   **Atomicità Key/Sequence**: L'invio di un messaggio recupera la chiave e il numero di sequenza in un'unica operazione atomica (sotto Mutex) per evitare collisioni di sequenza in caso di invii simultanei.
-*   **Avanzamento Atomico**: Lo stato del ratchet di ricezione viene aggiornato **solo dopo** che la decifratura del messaggio ha avuto successo (validazione del tag GCM). Questo previene attacchi di desincronizzazione tramite pacchetti malevoli.
+### Session Binding e AAD (v2.3):
+Ogni pacchetto è legato crittograficamente alla sessione tramite il **Session ID** incluso nei dati autenticati addizionali (AAD).
+
+### Gestione Concorrenza e Atomicità:
+*   **Atomicità Key/Sequence**: L'invio di un messaggio recupera la chiave e il numero di sequenza in un'unica operazione atomica (sotto Mutex).
+*   **Avanzamento Atomico**: Lo stato del ratchet di ricezione viene aggiornato **solo dopo** che la decifratura del messaggio ha avuto successo (validazione del tag GCM).
 
 ## 4. Cifratura dei Messaggi (AES-256-GCM)
 
 *   **Algoritmo**: AES/GCM/NoPadding.
-*   **Chiave**: `MessageKey` (256 bit).
-*   **IV**: 12 byte (generati casualmente per ogni messaggio).
-*   **Tag di Autenticazione**: 128 bit.
 *   **AAD (Additional Authenticated Data)**:
     *   `version` (1 byte)
     *   `payload_type` (1 byte)
     *   `sequence_number` (4 byte)
     *   `sender_onion` (stringa UTF-8)
+    *   `session_id` (stringa Base64)
 
 ## 5. Framing Binario e Protezione Network
 
@@ -75,4 +82,3 @@ I pacchetti sono inviati in formato binario:
 *   Timeout di 5 secondi per gli header binari.
 *   Dimensione massima del payload: 1 MB.
 *   Validazione rigorosa dell'indirizzo `.onion` del mittente tramite Regex.
-*   Massimo 5 connessioni simultanee.

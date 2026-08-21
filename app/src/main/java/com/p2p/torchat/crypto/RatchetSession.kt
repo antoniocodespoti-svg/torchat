@@ -9,7 +9,11 @@ import kotlinx.coroutines.sync.withLock
  * Implements KDF chain with skipped message keys support for out-of-order delivery.
  * Resolves REPLAY-001 and CRYPTO-003.
  */
-class SymmetricRatchetSession(initialSendKey: ByteArray, initialReceiveKey: ByteArray) {
+class SymmetricRatchetSession(
+    val sessionId: String,
+    initialSendKey: ByteArray,
+    initialReceiveKey: ByteArray
+) {
     private val mutex = Mutex()
     private var sendChainKey: ByteArray = initialSendKey
     private var receiveChainKey: ByteArray = initialReceiveKey

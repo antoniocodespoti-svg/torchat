@@ -160,7 +160,9 @@ object E2EManager {
         initiatorIK: String,
         initiatorEK: String,
         responderIK: String,
-        responderEK: String
+        responderEK: String,
+        initiatorNonce: ByteArray,
+        responderNonce: ByteArray
     ): ByteArray {
         val domain = "v2/hand".toByteArray(StandardCharsets.UTF_8)
         val iO = initiatorOnion.toByteArray(StandardCharsets.UTF_8)
@@ -170,7 +172,7 @@ object E2EManager {
         val rIK = responderIK.toByteArray(StandardCharsets.UTF_8)
         val rEK = responderEK.toByteArray(StandardCharsets.UTF_8)
 
-        val totalSize = domain.size + 4 + iO.size + 4 + rO.size + 4 + iIK.size + 4 + iEK.size + 4 + rIK.size + 4 + rEK.size
+        val totalSize = domain.size + 4 + iO.size + 4 + rO.size + 4 + iIK.size + 4 + iEK.size + 4 + rIK.size + 4 + rEK.size + 4 + initiatorNonce.size + 4 + responderNonce.size
         val buffer = ByteBuffer.allocate(totalSize)
         buffer.put(domain)
         buffer.putInt(iO.size); buffer.put(iO)
@@ -179,14 +181,26 @@ object E2EManager {
         buffer.putInt(iEK.size); buffer.put(iEK)
         buffer.putInt(rIK.size); buffer.put(rIK)
         buffer.putInt(rEK.size); buffer.put(rEK)
+        buffer.putInt(initiatorNonce.size); buffer.put(initiatorNonce)
+        buffer.putInt(responderNonce.size); buffer.put(responderNonce)
 
         return buffer.array()
     }
 
-    fun buildAAD(version: Byte, type: Byte, seq: Int, sender: String): ByteArray {
+    fun calculateSessionId(transcript: ByteArray): String {
+        val hash = MessageDigest.getInstance(Constants.SHA256_ALGO).digest(transcript)
+        return Base64.getEncoder().encodeToString(hash)
+    }
+
+    fun buildAAD(version: Byte, type: Byte, seq: Int, sender: String, sessionId: String): ByteArray {
         val onionBytes = sender.toByteArray(StandardCharsets.UTF_8)
-        val buffer = ByteBuffer.allocate(1 + 1 + 4 + onionBytes.size)
-        buffer.put(version); buffer.put(type); buffer.putInt(seq); buffer.put(onionBytes)
+        val sidBytes = sessionId.toByteArray(StandardCharsets.UTF_8)
+        val buffer = ByteBuffer.allocate(1 + 1 + 4 + 4 + onionBytes.size + 4 + sidBytes.size)
+        buffer.put(version)
+        buffer.put(type)
+        buffer.putInt(seq)
+        buffer.putInt(onionBytes.size); buffer.put(onionBytes)
+        buffer.putInt(sidBytes.size); buffer.put(sidBytes)
         return buffer.array()
     }
 

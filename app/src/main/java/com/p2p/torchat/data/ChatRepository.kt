@@ -29,7 +29,7 @@ class ChatRepository(
         val myOnion = (torManager.torState.value as? TorState.Running)?.onionAddress ?: return Result.failure(Exception("Tor not running"))
 
         val sendResult = session.nextSendKey()
-        val aad = E2EManager.buildAAD(1, PayloadType.CHAT_MESSAGE.ordinal.toByte(), sendResult.sequence, myOnion)
+        val aad = E2EManager.buildAAD(1, PayloadType.CHAT_MESSAGE.ordinal.toByte(), sendResult.sequence, myOnion, session.sessionId)
         val encrypted = E2EManager.encryptV2(content, sendResult.key, aad)
 
         val msg = Message(
