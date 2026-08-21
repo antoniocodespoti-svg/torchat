@@ -1,7 +1,7 @@
 package com.p2p.torchat.service
 
-import com.google.gson.Gson
 import com.p2p.torchat.model.NetworkPayload
+import com.p2p.torchat.util.Constants
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.DataOutputStream
@@ -12,64 +12,68 @@ import kotlin.random.Random
 
 /**
  * Hardened P2PMessenger with Binary Framing (NET-001).
+ * Now enforces binary transmission of encrypted payloads.
  */
 class P2PMessenger(
     private val socksProxyHost: String = "127.0.0.1",
-    private val socksProxyPort: Int = 9050,
+    private val socksProxyPort: Int = Constants.TOR_SOCKS_PORT,
 ) {
-    private val gson = Gson()
-
     companion object {
         private const val MAGIC_BYTE: Byte = 0x54 // 'T'
         private const val PROTOCOL_VERSION: Byte = 0x01
     }
 
-    suspend fun sendPayloadOverTor(
+    /**
+     * Sends an already encrypted payload over Tor.
+     */
+    suspend fun sendEncryptedPayload(
         recipientOnion: String,
-        payload: NetworkPayload,
+        type: Byte,
+        sequenceNumber: Int,
+        encryptedDataB64: String,
         timeoutMs: Int = 30000,
     ): Result<Boolean> {
         val cleanOnion = sanitizeOnion(recipientOnion)
+
+        // Add random jitter to obscure traffic patterns
         kotlinx.coroutines.delay(Random.nextLong(100, 500))
 
-        repeat(2) { attempt ->
-            val result =
-                withContext(Dispatchers.IO) {
-                    try {
-                        val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress(socksProxyHost, socksProxyPort))
-                        val socket = Socket(proxy)
-                        socket.connect(InetSocketAddress.createUnresolved(cleanOnion, 80), timeoutMs)
+        return withContext(Dispatchers.IO) {
+            try {
+                val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress(socksProxyHost, socksProxyPort))
+                val socket = Socket(proxy)
+                socket.connect(InetSocketAddress.createUnresolved(cleanOnion, 80), timeoutMs)
 
-                        val dos = DataOutputStream(socket.getOutputStream())
-                        val json = addBucketedPadding(gson.toJson(payload))
-                        val jsonBytes = json.toByteArray(Charsets.UTF_8)
+                val dos = DataOutputStream(socket.getOutputStream())
 
-                        // Write Binary Header
-                        dos.writeByte(MAGIC_BYTE.toInt())
-                        dos.writeByte(PROTOCOL_VERSION.toInt())
-                        dos.writeByte(payload.type.ordinal)
-                        dos.writeInt(payload.sequenceNumber)
-                        dos.writeInt(jsonBytes.size)
+                // Add bucketed padding to the base64 data to hide exact length
+                val paddedData = addBucketedPadding(encryptedDataB64)
+                val dataBytes = paddedData.toByteArray(Charsets.UTF_8)
 
-                        // Write Payload
-                        dos.write(jsonBytes)
-                        dos.flush()
-                        socket.close()
-                        Result.success(true)
-                    } catch (e: Exception) {
-                        Result.failure(e)
-                    }
-                }
-            if (result.isSuccess) return Result.success(true)
-            if (attempt < 1) kotlinx.coroutines.delay(2000)
+                // 1. Write Binary Header
+                dos.writeByte(MAGIC_BYTE.toInt())
+                dos.writeByte(PROTOCOL_VERSION.toInt())
+                dos.writeByte(type.toInt())
+                dos.writeInt(sequenceNumber)
+                dos.writeInt(dataBytes.size)
+
+                // 2. Write Payload
+                dos.write(dataBytes)
+                dos.flush()
+
+                socket.close()
+                Result.success(true)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
         }
-        return Result.failure(Exception("Tor delivery failed"))
     }
 
-    private fun addBucketedPadding(json: String): String {
-        val buckets = listOf(4096, 65536, 262144, 1048576, 5242880)
-        val targetSize = buckets.find { it > json.length } ?: json.length
-        return json.padEnd(targetSize, ' ')
+    private fun addBucketedPadding(data: String): String {
+        // Standard bucket sizes to prevent traffic analysis on message length
+        val buckets = listOf(1024, 4096, 16384, 65536, 262144, 1048576)
+        val targetSize = buckets.find { it > data.length } ?: data.length
+        return data.padEnd(targetSize, ' ')
     }
 
     private fun sanitizeOnion(o: String): String =
