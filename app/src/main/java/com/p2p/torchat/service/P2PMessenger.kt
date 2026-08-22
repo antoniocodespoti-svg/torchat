@@ -31,6 +31,7 @@ class P2PMessenger(
         recipientOnion: String,
         type: Byte,
         sequenceNumber: Int,
+        ratchetPubKey: String,
         encryptedDataB64: String,
         timeoutMs: Int = 30000,
     ): Result<Boolean> {
@@ -65,7 +66,12 @@ class P2PMessenger(
                 dos.writeInt(myOnionBytes.size)
                 dos.write(myOnionBytes)
 
-                // 3. Write Payload Length & Data
+                // 3. Write Ratchet Public Key
+                val rpkBytes = ratchetPubKey.toByteArray(Charsets.UTF_8)
+                dos.writeInt(rpkBytes.size)
+                dos.write(rpkBytes)
+
+                // 4. Write Payload Length & Data
                 dos.writeInt(dataBytes.size)
                 dos.write(dataBytes)
                 dos.flush()

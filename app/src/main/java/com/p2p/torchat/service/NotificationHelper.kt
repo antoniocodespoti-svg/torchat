@@ -35,14 +35,16 @@ class NotificationHelper(private val context: Context) {
         sender: String,
         message: String,
     ) {
+        // Resolves Audit Point 4: Privacy - Never show plaintext in notifications
         val builder =
             NotificationCompat.Builder(context, CHANNEL_ID)
-                .setSmallIcon(android.R.drawable.ic_dialog_info) // System default icon for now
-                .setContentTitle("Tor P2P Chat")
-                .setContentText("Hai ricevuto un nuovo messaggio")
+                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .setContentTitle("TorChat")
+                .setContentText("Nuovo messaggio ricevuto") // Generic message
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setDefaults(NotificationCompat.DEFAULT_ALL)
                 .setAutoCancel(true)
+                .setVisibility(NotificationCompat.VISIBILITY_SECRET) // Hide from lockscreen
 
         val notificationManager: NotificationManager =
             context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager

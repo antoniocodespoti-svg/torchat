@@ -21,6 +21,7 @@ data class RawPacket(
     val type: Byte,
     val sequenceNumber: Int,
     val senderOnion: String,
+    val ratchetPubKey: String,
     val dataB64: String,
     val senderAddress: String // IP/Host of the incoming connection
 )
@@ -109,17 +110,33 @@ class LocalServer(
                     return@launch
                 }
 
-                // 6. Read Payload Length
+                // 6. Read Ratchet Public Key (Resolves Audit Point 1)
+                val pubKeyLen = dis.readInt()
+                if (pubKeyLen <= 0 || pubKeyLen > 1024) { // Ed25519/X25519 are small
+                    return@launch
+                }
+                val pubKeyBytes = ByteArray(pubKeyLen)
+                dis.readFully(pubKeyBytes)
+                val ratchetPubKey = String(pubKeyBytes, Charsets.UTF_8)
+
+                // 7. Read Payload Length
                 val length = dis.readInt()
                 if (length <= 0 || length > MAX_PAYLOAD_SIZE) {
+                    Log.w(TAG, "Invalid payload length: $length")
                     return@launch
                 }
 
-                // 7. Read Payload
+                // 8. Read Payload
                 val payloadBytes = ByteArray(length)
-                dis.readFully(payloadBytes)
+                try {
+                    dis.readFully(payloadBytes)
+                } catch (e: java.io.EOFException) {
+                    Log.w(TAG, "Incomplete payload received from ${socket.inetAddress}")
+                    return@launch
+                }
 
-                val data = String(payloadBytes, Charsets.UTF_8).trim()
+                val rawData = String(payloadBytes, Charsets.UTF_8).trim()
+                if (rawData.isEmpty()) return@launch
 
                 onPacketReceived(
                     RawPacket(
@@ -127,7 +144,8 @@ class LocalServer(
                         type = type,
                         sequenceNumber = seq,
                         senderOnion = senderOnion,
-                        dataB64 = data,
+                        ratchetPubKey = ratchetPubKey,
+                        dataB64 = rawData,
                         senderAddress = socket.inetAddress.hostAddress ?: "unknown"
                     )
                 )

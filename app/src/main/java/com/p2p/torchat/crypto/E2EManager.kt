@@ -144,6 +144,24 @@ object E2EManager {
         return derived.sliceArray(0..31) to derived.sliceArray(32..63)
     }
 
+    /**
+     * Double Ratchet KDF for Root Chain.
+     * KDF_Root(RK, DH_out) -> (Next_RK, CK)
+     */
+    fun kdfRoot(rootKey: ByteArray, dhOutput: ByteArray): Pair<ByteArray, ByteArray> {
+        val derived = HKDF.deriveKey(dhOutput, rootKey, "TorChat/v2/dr/root".toByteArray(StandardCharsets.UTF_8), 64)
+        return derived.sliceArray(0..31) to derived.sliceArray(32..63)
+    }
+
+    /**
+     * Double Ratchet KDF for Message Chains.
+     * KDF_Chain(CK) -> (Next_CK, MK)
+     */
+    fun kdfChain(chainKey: ByteArray, label: String): Pair<ByteArray, ByteArray> {
+        val derived = HKDF.deriveKey(chainKey, null, "TorChat/v2/dr/chain/$label".toByteArray(StandardCharsets.UTF_8), 64)
+        return derived.sliceArray(0..31) to derived.sliceArray(32..63)
+    }
+
     fun deriveInitialChainKeys(sharedSecret: ByteArray, myOnion: String, peerOnion: String): Pair<ByteArray, ByteArray> {
         val infoSend = "TorChat/v2/chain/$myOnion->$peerOnion".toByteArray()
         val infoReceive = "TorChat/v2/chain/$peerOnion->$myOnion".toByteArray()
@@ -221,15 +239,24 @@ object E2EManager {
         return Base64.getEncoder().encodeToString(hash)
     }
 
-    fun buildAAD(version: Byte, type: Byte, seq: Int, sender: String, sessionId: String): ByteArray {
+    fun buildAAD(
+        version: Byte,
+        type: Byte,
+        seq: Int,
+        sender: String,
+        sessionId: String,
+        ratchetPublicKey: String
+    ): ByteArray {
         val onionBytes = sender.toByteArray(StandardCharsets.UTF_8)
         val sidBytes = sessionId.toByteArray(StandardCharsets.UTF_8)
-        val buffer = ByteBuffer.allocate(1 + 1 + 4 + 4 + onionBytes.size + 4 + sidBytes.size)
+        val rpkBytes = ratchetPublicKey.toByteArray(StandardCharsets.UTF_8)
+        val buffer = ByteBuffer.allocate(1 + 1 + 4 + 4 + onionBytes.size + 4 + sidBytes.size + 4 + rpkBytes.size)
         buffer.put(version)
         buffer.put(type)
         buffer.putInt(seq)
         buffer.putInt(onionBytes.size); buffer.put(onionBytes)
         buffer.putInt(sidBytes.size); buffer.put(sidBytes)
+        buffer.putInt(rpkBytes.size); buffer.put(rpkBytes)
         return buffer.array()
     }
 
