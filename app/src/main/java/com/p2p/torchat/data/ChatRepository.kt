@@ -29,7 +29,7 @@ class ChatRepository(
         val header = sendResult.header
         val rpkStr = E2EManager.publicKeyToString(header.ratchetPublicKey)
         val msgSeq = ++networkSequence
-        val aad = E2EManager.buildAAD(1, PayloadType.CHAT_MESSAGE.ordinal.toByte(), msgSeq, myOnion, session.sessionId, rpkStr)
+        val aad = E2EManager.buildAAD(1, PayloadType.CHAT_MESSAGE.ordinal.toByte(), msgSeq, myOnion, session.sessionId, rpkStr, header.pn, header.n)
         val encrypted = E2EManager.encryptV2(content, sendResult.messageKey, aad)
 
         val msg = Message(

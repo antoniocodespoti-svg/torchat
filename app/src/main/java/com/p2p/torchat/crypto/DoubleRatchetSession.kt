@@ -6,9 +6,9 @@ import java.security.KeyPair
 import java.security.PublicKey
 
 /**
- * Full Double Ratchet Session implementation (v2.5).
+ * Full Double Ratchet Session implementation (v2.6).
  * Adheres to the Signal Double Ratchet specification.
- * Resolves Audit Point 2 & 3.
+ * Resolves Audit Point 2 & RATCHET-TX (Transactional updates).
  */
 class DoubleRatchetSession(
     val sessionId: String,
@@ -59,9 +59,7 @@ class DoubleRatchetSession(
      */
     suspend fun nextSendKey(): SendResult = mutex.withLock {
         if (sendChainKey == null) {
-            // Initial DH for Responder or re-initialization
             if (peerRatchetPublicKey != null) {
-                // When we create a new sending chain, we record the length of the previous one
                 pn = nSend
                 nSend = 0
                 myRatchetKeyPair = E2EManager.generateEphemeralKeyPair()
@@ -86,6 +84,7 @@ class DoubleRatchetSession(
 
     /**
      * Attempts to decrypt a message using the Double Ratchet.
+     * Transactional: only commits state if decryption is successful.
      */
     suspend fun tryDecrypt(
         header: RatchetHeader,
@@ -102,41 +101,68 @@ class DoubleRatchetSession(
             return@withLock decrypted
         }
 
-        // 2. Perform DH Ratchet Step if peer sent a new public key
-        if (header.ratchetPublicKey != peerRatchetPublicKey) {
-            skipMessageKeys(header.pn) // Skip remaining keys in the PREVIOUS chain
-            dhRatchetStep(header.ratchetPublicKey)
+        // 2. Snapshot current state for potential rollback
+        val snapshotRootKey = rootKey.copyOf()
+        val snapshotSendCK = sendChainKey?.copyOf()
+        val snapshotRecvCK = receiveChainKey?.copyOf()
+        val snapshotMyKeyPair = myRatchetKeyPair
+        val snapshotPeerPK = peerRatchetPublicKey
+        val snapshotNSend = nSend
+        val snapshotNRecv = nRecv
+        val snapshotPN = pn
+
+        val tempSkipped = mutableMapOf<Pair<String, Int>, ByteArray>()
+
+        try {
+            // 3. DH Ratchet Step if needed
+            if (header.ratchetPublicKey != peerRatchetPublicKey) {
+                skipMessageKeysInternal(header.pn, tempSkipped)
+                dhRatchetStepInternal(header.ratchetPublicKey)
+            }
+
+            // 4. Skip messages in the CURRENT chain if necessary
+            skipMessageKeysInternal(header.n, tempSkipped)
+
+            // 5. Advance Symmetric Ratchet
+            val (nextCK, mk) = E2EManager.kdfChain(receiveChainKey!!, "constant")
+
+            // 6. Try to decrypt before committing state
+            val decrypted = decryptFn(encB64, mk, aad)
+
+            // 7. Successful decryption: Commit state and add temp skipped keys
+            receiveChainKey = nextCK
+            nRecv++
+            skippedMessageKeys.putAll(tempSkipped)
+
+            return@withLock decrypted
+
+        } catch (e: Exception) {
+            // 8. ROLLBACK state on failure
+            rootKey = snapshotRootKey
+            sendChainKey = snapshotSendCK
+            receiveChainKey = snapshotRecvCK
+            myRatchetKeyPair = snapshotMyKeyPair
+            peerRatchetPublicKey = snapshotPeerPK
+            nSend = snapshotNSend
+            nRecv = snapshotNRecv
+            pn = snapshotPN
+            throw e
         }
-
-        // 3. Skip messages in the CURRENT chain if necessary
-        skipMessageKeys(header.n)
-
-        // 4. Advance Symmetric Ratchet
-        val (nextCK, mk) = E2EManager.kdfChain(receiveChainKey!!, "constant")
-
-        // 5. Try to decrypt before committing state
-        val decrypted = decryptFn(encB64, mk, aad)
-
-        // 6. Commitment: Successful decryption, update state
-        receiveChainKey = nextCK
-        nRecv++
-
-        return@withLock decrypted
     }
 
-    private fun dhRatchetStep(newPeerPubKey: PublicKey) {
+    private fun dhRatchetStepInternal(newPeerPubKey: PublicKey) {
         pn = nSend
         nSend = 0
         nRecv = 0
         peerRatchetPublicKey = newPeerPubKey
 
-        // Receiving Chain advancement
+        // Receiving Chain
         val dhOutRecv = E2EManager.calculateSharedSecret(myRatchetKeyPair.private, peerRatchetPublicKey!!)
         val (rootAfterRecv, newRecvCK) = E2EManager.kdfRoot(rootKey, dhOutRecv)
         rootKey = rootAfterRecv
         receiveChainKey = newRecvCK
 
-        // Sending Chain advancement
+        // Sending Chain
         myRatchetKeyPair = E2EManager.generateEphemeralKeyPair()
         val dhOutSend = E2EManager.calculateSharedSecret(myRatchetKeyPair.private, peerRatchetPublicKey!!)
         val (rootAfterSend, newSendCK) = E2EManager.kdfRoot(rootKey, dhOutSend)
@@ -144,38 +170,28 @@ class DoubleRatchetSession(
         sendChainKey = newSendCK
     }
 
-    private fun skipMessageKeys(untilN: Int) {
+    private fun skipMessageKeysInternal(untilN: Int, tempMap: MutableMap<Pair<String, Int>, ByteArray>) {
         if (receiveChainKey == null) return
 
         if (nRecv + (untilN - nRecv) > MAX_SKIPPED_KEYS) {
-            throw SecurityException("Too many messages skipped (DoS protection)")
+            throw SecurityException("Too many messages skipped")
         }
 
         if (untilN - nRecv > MAX_SKIP_GAP) {
-            throw SecurityException("Gap too large (DoS protection)")
+            throw SecurityException("Gap too large")
         }
 
         val currentPeerKeyStr = E2EManager.publicKeyToString(peerRatchetPublicKey!!)
         while (nRecv < untilN) {
             val (nextCK, mk) = E2EManager.kdfChain(receiveChainKey!!, "constant")
             receiveChainKey = nextCK
-            skippedMessageKeys[currentPeerKeyStr to nRecv] = mk
+            tempMap[currentPeerKeyStr to nRecv] = mk
             nRecv++
-
-            // Limit memory usage for skipped keys
-            if (skippedMessageKeys.size > MAX_SKIPPED_KEYS) {
-                val oldest = skippedMessageKeys.keys.first()
-                skippedMessageKeys.remove(oldest)
-            }
         }
     }
 
-    /**
-     * Initializer for Responder (Bob) after receiving the first handshake message.
-     */
     fun BobInit(peerPubKey: PublicKey) {
         peerRatchetPublicKey = peerPubKey
-        // Bob starts with a receiving chain derived from (Bob_EK, Alice_EK)
         val dhOut = E2EManager.calculateSharedSecret(myRatchetKeyPair.private, peerRatchetPublicKey!!)
         val (newRoot, newRecvCK) = E2EManager.kdfRoot(rootKey, dhOut)
         rootKey = newRoot

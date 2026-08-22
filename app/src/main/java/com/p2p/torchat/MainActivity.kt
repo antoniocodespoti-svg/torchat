@@ -38,8 +38,6 @@ import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
 import java.security.*
-import java.security.spec.X509EncodedKeySpec
-import java.security.spec.PKCS8EncodedKeySpec
 import java.util.Base64
 import java.util.UUID
 
@@ -238,7 +236,7 @@ class MainActivity : ComponentActivity() {
                             try {
                                 val peerRatchetKey = E2EManager.stringToPublicKey(packet.ratchetPubKey, Constants.X25519_ALGO)
                                 val header = DoubleRatchetSession.RatchetHeader(peerRatchetKey, packet.pn, packet.n)
-                                val aad = E2EManager.buildAAD(packet.version, packet.type, packet.sequenceNumber, onion, session.sessionId, packet.ratchetPubKey)
+                                val aad = E2EManager.buildAAD(packet.version, packet.type, packet.sequenceNumber, onion, session.sessionId, packet.ratchetPubKey, packet.pn, packet.n)
 
                                 val dec = session.tryDecrypt(header, packet.dataB64, aad) { enc, key, a ->
                                     E2EManager.decryptV2(enc, key, a)
@@ -447,7 +445,7 @@ class MainActivity : ComponentActivity() {
                 val rpkStr = E2EManager.publicKeyToString(header.ratchetPublicKey)
                 val seq = (System.currentTimeMillis() % Int.MAX_VALUE).toInt() // Network sequence
 
-                val aad = E2EManager.buildAAD(1, PayloadType.CHAT_MESSAGE.ordinal.toByte(), seq, myOnion, session.sessionId, rpkStr)
+                val aad = E2EManager.buildAAD(1, PayloadType.CHAT_MESSAGE.ordinal.toByte(), seq, myOnion, session.sessionId, rpkStr, header.pn, header.n)
                 val encrypted = E2EManager.encryptV2(content, sendResult.messageKey, aad)
 
                 withContext(Dispatchers.Main) {
@@ -489,9 +487,13 @@ class MainActivity : ComponentActivity() {
             if (h != null) {
                 val data = E2EManager.encrypt(j, E2EManager.deriveKeyFromSecret(h, getOrCreateSalt()))
                 p.edit().putString(Constants.KEY_SAVED_PEERS, data).apply()
+            } else {
+                // If not authenticated yet, we don't save or save temporarily?
+                // For security, never save unencrypted peers.
+                Log.w(TAG, "Postponing peers save: No password hash available.")
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to encrypt and save peers database", e)
+            Log.e(TAG, "CRITICAL: Failed to encrypt and save peers database. Data is NOT saved.", e)
         }
     }
     private fun getOrCreateSalt(): ByteArray { val p = getSharedPreferences("secure_prefs_salt", Context.MODE_PRIVATE); val sEnc = p.getString("install_salt_enc", null) ?: return generateAndSaveSalt(p); return try { Base64.getDecoder().decode(E2EManager.decryptWithHardwareKey(sEnc).getOrThrow()) } catch (e: Exception) { generateAndSaveSalt(p) } }

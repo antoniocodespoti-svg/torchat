@@ -1,5 +1,6 @@
 package com.p2p.torchat.crypto
 
+import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Log
@@ -123,6 +124,8 @@ object E2EManager {
 
         // Use a KeyPairGenerator with the same seed to get the matching PublicKey.
         // For Ed25519, we use NamedParameterSpec instead of bit size.
+        // Note: Requires API 33, for lower versions we fall back to a deterministic SecureRandom
+        // which is standard-compliant for Ed25519 seed-to-key mapping.
         val kg = KeyPairGenerator.getInstance(Constants.ED25519_ALGO)
         val sr = object : SecureRandom() {
             private var pos = 0
@@ -130,7 +133,18 @@ object E2EManager {
                 for (i in bytes.indices) { bytes[i] = seed[pos % seed.size]; pos++ }
             }
         }
-        kg.initialize(java.security.spec.NamedParameterSpec("Ed25519"), sr)
+
+        if (Build.VERSION.SDK_INT >= 33) {
+            kg.initialize(java.security.spec.NamedParameterSpec.ED25519, sr)
+        } else {
+            // KeyPairGenerator for Ed25519 on Android < 33.
+            // Size 256 is correct for some providers, 255 for others.
+            try {
+                kg.initialize(256, sr)
+            } catch (e: Exception) {
+                kg.initialize(255, sr)
+            }
+        }
         val pair = kg.generateKeyPair()
         return KeyPair(pair.public, privateKey)
     }
@@ -264,18 +278,23 @@ object E2EManager {
         seq: Int,
         sender: String,
         sessionId: String,
-        ratchetPublicKey: String
+        ratchetPublicKey: String,
+        pn: Int,
+        n: Int
     ): ByteArray {
         val onionBytes = sender.toByteArray(StandardCharsets.UTF_8)
         val sidBytes = sessionId.toByteArray(StandardCharsets.UTF_8)
         val rpkBytes = ratchetPublicKey.toByteArray(StandardCharsets.UTF_8)
-        val buffer = ByteBuffer.allocate(1 + 1 + 4 + 4 + onionBytes.size + 4 + sidBytes.size + 4 + rpkBytes.size)
+
+        val buffer = ByteBuffer.allocate(1 + 1 + 4 + 4 + onionBytes.size + 4 + sidBytes.size + 4 + rpkBytes.size + 4 + 4)
         buffer.put(version)
         buffer.put(type)
         buffer.putInt(seq)
         buffer.putInt(onionBytes.size); buffer.put(onionBytes)
         buffer.putInt(sidBytes.size); buffer.put(sidBytes)
         buffer.putInt(rpkBytes.size); buffer.put(rpkBytes)
+        buffer.putInt(pn)
+        buffer.putInt(n)
         return buffer.array()
     }
 

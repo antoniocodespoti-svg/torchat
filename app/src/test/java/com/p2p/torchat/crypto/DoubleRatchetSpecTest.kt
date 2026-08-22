@@ -33,9 +33,9 @@ class DoubleRatchetSpecTest {
             assertEquals(0, sA1.header.pn)
 
             // Bob receives them
-            val dA1 = bob.tryDecrypt(sA1.header, "enc1", ByteArray(0)) { e, k, a -> "A1" }
-            val dA3 = bob.tryDecrypt(sA3.header, "enc3", ByteArray(0)) { e, k, a -> "A3" } // Out of order
-            val dA2 = bob.tryDecrypt(sA2.header, "enc2", ByteArray(0)) { e, k, a -> "A2" } // From skipped
+            val dA1 = bob.tryDecrypt(sA1.header, "enc1", ByteArray(0)) { _, _, _ -> "A1" }
+            val dA3 = bob.tryDecrypt(sA3.header, "enc3", ByteArray(0)) { _, _, _ -> "A3" } // Out of order
+            val dA2 = bob.tryDecrypt(sA2.header, "enc2", ByteArray(0)) { _, _, _ -> "A2" } // From skipped
 
             assertEquals("A1", dA1)
             assertEquals("A2", dA2)
@@ -50,7 +50,7 @@ class DoubleRatchetSpecTest {
             assertEquals(0, sB1.header.pn) // Bob's first sending chain
 
             // Alice receives B1
-            val dB1 = alice.tryDecrypt(sB1.header, "encB1", ByteArray(0)) { e, k, a -> "B1" }
+            val dB1 = alice.tryDecrypt(sB1.header, "encB1", ByteArray(0)) { _, _, _ -> "B1" }
             assertEquals("B1", dB1)
 
             // Alice sends A4 -> Triggers another DH Ratchet for Alice
@@ -59,7 +59,7 @@ class DoubleRatchetSpecTest {
             assertEquals(3, sA4.header.pn) // Alice's previous chain had 3 messages (A1, A2, A3)
 
             // Bob receives A4
-            val dA4 = bob.tryDecrypt(sA4.header, "encA4", ByteArray(0)) { e, k, a -> "A4" }
+            val dA4 = bob.tryDecrypt(sA4.header, "encA4", ByteArray(0)) { _, _, _ -> "A4" }
             assertEquals("A4", dA4)
         }
     }

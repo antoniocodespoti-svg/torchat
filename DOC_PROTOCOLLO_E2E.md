@@ -1,63 +1,47 @@
-# Specifica Protocollo TorChat E2EE (v2.4.2)
+# Specifica Protocollo TorChat E2EE (v2.6)
 
 Questo documento descrive il protocollo di crittografia end-to-end utilizzato da TorChat per la comunicazione sicura tra peer su rete Tor.
 
 ## 1. Handshake e Scambio Chiavi (3-Way Authenticated Exchange)
 
-La versione 2.4.2 consolida l'**Handshake a 3 vie** con protezioni atomiche anti-DoS.
+TorChat v2.6 utilizza un **Handshake a 3 vie** completamente autenticato e resistente al replay.
 
 ### Fasi dell'Handshake:
-1.  **Iniziatore (Alice) - PFS_INIT**:
-    *   Genera una coppia di chiavi effimere X25519 (`eA_pub`, `eA_priv`) e un **nonce casuale** (`nA`) di 16 byte.
-    *   Firma il **Transcript di Inizio** (`v2/init | onions | ikA | eA | nA`) con la propria chiave di identità Ed25519.
-    *   Invia (`eA_pub`, `identity_key_A`, `nA`, firma_Alice_Init) a Bob.
+1.  **PFS_INIT (Alice)**: Alice genera `eA` (X25519) e `nA` (nonce 16 byte). Invia `eA_pub`, `ikA_pub`, `nA` e la firma di Alice sul transcript iniziale (`v2/init`).
+2.  **PFS_ACCEPT (Bob)**: Bob verifica la firma, genera `eB` (X25519) e `nB` (nonce 16 byte). Invia `eB_pub`, `ikB_pub`, `nA`, `nB` e la firma di Bob sul transcript completo (`v2/hand`).
+3.  **PFS_FINAL (Alice)**: Alice verifica la firma di Bob e invia la propria firma finale sul transcript completo.
 
-2.  **Risponditore (Bob) - PFS_ACCEPT**:
-    *   Riceve il pacchetto di Alice.
-    *   **Verifica immediatamente la firma di Alice** prima di procedere.
-    *   Genera la propria coppia effimera X25519 (`eB_pub`, `eB_priv`) e un proprio **nonce challenge** (`nB`).
-    *   Crea un **Handshake Transcript** binario canonico contenente le identità, le chiavi effimere e i nonce di entrambi.
-    *   Firma il transcript con la propria chiave di identità Ed25519.
-    *   Invia (`eB_pub`, firma_Bob, `identity_key_B`, `nA_echo`, `nB`) ad Alice.
-    *   Bob memorizza lo stato in `HandshakeManager` (DoS protected).
+**Session ID**: `SHA256(Handshake Transcript completo)`.
 
-3.  **Iniziatore (Alice) - PFS_FINAL**:
-    *   Riceve `PFS_ACCEPT`.
-    *   Verifica la firma di Bob sul transcript ricostruito.
-    *   Firma lo stesso transcript completo con la propria chiave di identità Ed25519.
-    *   Invia (firma_Alice_Final, `nA_echo`, `nB_echo`) a Bob.
-    *   Alice attiva la sessione.
+## 2. Algoritmo Double Ratchet
 
-4.  **Finalizzazione (Bob)**:
-    *   Riceve `PFS_FINAL`.
-    *   Verifica la firma finale di Alice sul transcript memorizzato.
-    *   Bob attiva la sessione.
+TorChat implementa l'algoritmo **Double Ratchet** standard per garantire Forward Secrecy e Post-Compromise Security.
 
-### Protezioni DoS (v2.4.2):
-*   **Limiti Handshake Atomici**: Massimo 3 handshake pendenti per peer e 50 totali a livello globale. L'enforcement dei limiti è atomico (thread-safe) per prevenire bypass tramite richieste concorrenti.
-*   **Anti-Overwrite**: Non è possibile sovrascrivere un handshake pendente con lo stesso nonce, prevenendo attacchi di reset della sessione durante l'handshake.
-*   **Clock Monotonico**: Cleanup degli handshake scaduti (TTL 60s) basato su clock di sistema non alterabile dall'utente.
-*   **Autenticazione Precoce**: Il risponditore scarta richieste non firmate o non valide al primo step senza allocare risorse pesanti.
+### 2.1 State Management Transazionale
+Lo stato della sessione (Root Key, Chain Keys, N, PN) viene aggiornato **solo dopo** che il messaggio ricevuto è stato autenticato con successo tramite il tag AES-GCM. Qualsiasi errore di decifratura comporta il rollback istantaneo allo stato precedente, prevenendo la corruzione della sessione.
 
-## 2. Derivazione delle Chain Key (Split Ratchet)
+### 2.2 Header del Protocollo
+Ogni messaggio include un header contenente:
+*   `ratchet_public_key`: Chiave pubblica DH corrente del mittente.
+*   `pn`: Lunghezza della catena di invio precedente (Previous Counter).
+*   `n`: Numero del messaggio nella catena corrente (Message Counter).
 
-Alice e Bob derivano due catene di chiavi simmetriche distinte utilizzando HKDF-SHA256 con etichette direzionali.
+### 2.3 Derivazione delle Chiavi
+*   `KDF_Root(RK, DH_out) -> (Next_RK, CK)`
+*   `KDF_Chain(CK) -> (Next_CK, MessageKey)`
+*   Utilizza HKDF-SHA256 con separazione di dominio (`TorChat/v2/dr/...`).
 
-*   `Chain_A_to_B = HKDF(SharedSecret, salt=null, info="TorChat/v2/chain/OnionA->OnionB", len=32)`
-*   `Chain_B_to_A = HKDF(SharedSecret, salt=null, info="TorChat/v2/chain/OnionB->OnionA", len=32)`
+## 3. Cifratura e AAD
 
-## 3. Symmetric Split Ratchet
+*   **Algoritmo**: AES-256-GCM.
+*   **AAD (Additional Authenticated Data)**: Include versione, tipo, Session ID, sender Onion, ratchet key, PN e N. Questo garantisce che un messaggio sia legato indissolubilmente alla sessione e alla sua posizione nel ratchet.
 
-Ogni messaggio avanza la catena simmetrica. Il ratchet garantisce la **Forward Secrecy** all'interno della sessione.
+## 4. Identità Deterministica
 
-> [!NOTE]
-> Il protocollo non fornisce attualmente *Post-Compromise Security* in quanto non implementa un DH ratchet periodico.
+L'identità Ed25519 e l'indirizzo .onion sono derivati deterministicamente dal seme della mnemonica a 12 parole tramite HKDF-SHA256. Questo garantisce che il possesso della mnemonica sia sufficiente e necessario per recuperare l'intera identità crittografica.
 
-### Session Binding e AAD:
-Ogni pacchetto è legato crittograficamente alla sessione tramite il **Session ID** (SHA256 del Transcript completo) incluso nei dati autenticati addizionali (AAD).
+## 5. Protezioni Anti-DoS e Network
 
-## 4. Protezioni di Sicurezza
-
-*   **Handshake Replay Protection**: Il risponditore (Bob) verifica la liveness dell'iniziatore tramite il 3rd step.
-*   **Atomic State Updates**: Il ratchet avanza solo dopo una decifratura GCM avvenuta con successo.
-*   **Onion Validation**: Tutti gli indirizzi .onion sono validati tramite Regex prima di ogni operazione.
+*   **Handshake Limits**: Massimo 3 handshake pendenti per peer e 50 globali, con enforcement atomico.
+*   **Framing Validation**: Validazione rigorosa delle lunghezze dei campi prima di ogni allocazione di memoria.
+*   **Skipped Keys Limit**: Massimo 1000 chiavi saltate memorizzate per sessione, con un gap massimo di 100 messaggi.
