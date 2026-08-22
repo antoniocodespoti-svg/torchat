@@ -12,8 +12,8 @@ class ProtocolSecurityTest {
     @Test
     fun testFullDoubleRatchetExchange() {
         runBlocking {
-            val aliceIKP = E2EManager.generateIdentityKeyPair()
-            val bobIKP = E2EManager.generateIdentityKeyPair()
+            val aliceIKP = E2EManager.ed25519KeyPairFromSeed(E2EManager.generateIdentitySeed())
+            val bobIKP = E2EManager.ed25519KeyPairFromSeed(E2EManager.generateIdentitySeed())
             val aliceOnion = "alice777777777777777777777777777777777777777777777777777.onion"
             val bobOnion = "bob8888888888888888888888888888888888888888888888888888.onion"
             val sharedSecret = ByteArray(32) { 0x42.toByte() }

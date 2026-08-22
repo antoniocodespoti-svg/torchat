@@ -16,7 +16,7 @@ object Constants {
     const val KEY_DARK_THEME = "is_dark_theme"
     const val KEY_AUTO_BACKUP = "is_auto_backup_enabled"
     const val KEY_PUBLIC_KEY = "my_public_key"
-    const val KEY_PRIVATE_KEY_ENC = "my_private_key_enc"
+    const val KEY_IDENTITY_SEED_ENC = "my_identity_seed_enc"
     const val KEY_SAVED_PEERS = "saved_peers"
     const val KEY_SAVED_SEED = "saved_seed"
     const val KEY_AVAILABILITY = "is_available"

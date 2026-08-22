@@ -496,8 +496,47 @@ class MainActivity : ComponentActivity() {
         android.os.Process.killProcess(android.os.Process.myPid())
         System.exit(0)
     }
-    private fun loadOrGenerateIdentityKeys(p: android.content.SharedPreferences) { val pub = p.getString(Constants.KEY_PUBLIC_KEY, null); val privEnc = p.getString(Constants.KEY_PRIVATE_KEY_ENC, null); if (pub != null && privEnc != null) try { val priv = E2EManager.decryptWithHardwareKey(privEnc).getOrThrow(); val f = KeyFactory.getInstance(Constants.ED25519_ALGO); myIdentityKeyPair = KeyPair(f.generatePublic(X509EncodedKeySpec(Base64.getDecoder().decode(pub))), f.generatePrivate(PKCS8EncodedKeySpec(Base64.getDecoder().decode(priv)))) } catch (e: Exception) { generateNewIdentityKeys(p) } else generateNewIdentityKeys(p) }
-    private fun generateNewIdentityKeys(p: android.content.SharedPreferences) { myIdentityKeyPair = E2EManager.generateIdentityKeyPair(); val priv = Base64.getEncoder().encodeToString(myIdentityKeyPair!!.private.encoded); val enc = E2EManager.encryptWithHardwareKey(priv).getOrNull() ?: ""; p.edit().apply { putString(Constants.KEY_PUBLIC_KEY, E2EManager.publicKeyToString(myIdentityKeyPair!!.public)); putString(Constants.KEY_PRIVATE_KEY_ENC, enc); apply() } }
+    private fun loadOrGenerateIdentityKeys(p: android.content.SharedPreferences) {
+        val seedEnc = p.getString(Constants.KEY_IDENTITY_SEED_ENC, null)
+        if (seedEnc != null) {
+            try {
+                val seed = Base64.getDecoder().decode(E2EManager.decryptWithHardwareKey(seedEnc).getOrThrow())
+                myIdentityKeyPair = E2EManager.ed25519KeyPairFromSeed(seed)
+                p.edit().putString(Constants.KEY_PUBLIC_KEY, E2EManager.publicKeyToString(myIdentityKeyPair!!.public)).apply()
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to restore identity from seed", e)
+                ensureIdentityLinkedToMnemonic(p)
+            }
+        } else {
+            ensureIdentityLinkedToMnemonic(p)
+        }
+    }
+
+    /**
+     * Ensures that the identity seed is derived from the mnemonic entropy.
+     * Resolves Audit Point 5 & 6.
+     */
+    private fun ensureIdentityLinkedToMnemonic(p: android.content.SharedPreferences) {
+        val savedMnemonic = p.getString(Constants.KEY_SAVED_SEED, null)
+        val mnemonic = if (savedMnemonic != null) savedMnemonic.split(" ") else {
+            val newMnemonic = MnemonicManager.generateMnemonic()
+            p.edit().putString(Constants.KEY_SAVED_SEED, newMnemonic.joinToString(" ")).apply()
+            newMnemonic
+        }
+
+        val entropy = MnemonicManager.mnemonicToEntropy(mnemonic) ?: E2EManager.generateIdentitySeed()
+        // Derive a 32-byte seed from the mnemonic entropy using HKDF
+        val identitySeed = HKDF.deriveKey(entropy, null, "TorChat/V1/IdentitySeed".toByteArray(), 32)
+
+        myIdentityKeyPair = E2EManager.ed25519KeyPairFromSeed(identitySeed)
+        val seedEnc = E2EManager.encryptWithHardwareKey(Base64.getEncoder().encodeToString(identitySeed)).getOrNull() ?: ""
+
+        p.edit().apply {
+            putString(Constants.KEY_IDENTITY_SEED_ENC, seedEnc)
+            putString(Constants.KEY_PUBLIC_KEY, E2EManager.publicKeyToString(myIdentityKeyPair!!.public))
+            apply()
+        }
+    }
     private fun initiateHandshake(p: Peer) {
         if (p.identityPublicKey.isEmpty()) return
         if (handshakeLoading[p.onionAddress] == true) return

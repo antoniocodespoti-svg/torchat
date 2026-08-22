@@ -101,8 +101,28 @@ object E2EManager {
         return SecretKeySpec(raw, "AES")
     }
 
-    fun deriveIdentityKeyPair(entropy: ByteArray): KeyPair {
-        val seed = HKDF.deriveKey(entropy, null, "TorChat/identity/ed25519/v1".toByteArray(), 32)
+    /**
+     * Generates a 32-byte random seed for identity derivation.
+     */
+    fun generateIdentitySeed(): ByteArray = ByteArray(32).apply { SecureRandom().nextBytes(this) }
+
+    /**
+     * Derives an Ed25519 KeyPair deterministically from a 32-byte seed.
+     * Resolves Audit Point 4 using standard PKCS#8 encoding.
+     */
+    fun ed25519KeyPairFromSeed(seed: ByteArray): KeyPair {
+        require(seed.size == 32) { "Seed must be 32 bytes" }
+        // PKCS#8 prefix for Ed25519 private keys (RFC 8410)
+        val prefix = byteArrayOf(0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20)
+        val pkcs8 = ByteArray(prefix.size + seed.size)
+        System.arraycopy(prefix, 0, pkcs8, 0, prefix.size)
+        System.arraycopy(seed, 0, pkcs8, prefix.size, seed.size)
+
+        val kf = KeyFactory.getInstance(Constants.ED25519_ALGO)
+        val privateKey = kf.generatePrivate(PKCS8EncodedKeySpec(pkcs8))
+
+        // Use a KeyPairGenerator with the same seed to get the matching PublicKey.
+        // For Ed25519, we use NamedParameterSpec instead of bit size.
         val kg = KeyPairGenerator.getInstance(Constants.ED25519_ALGO)
         val sr = object : SecureRandom() {
             private var pos = 0
@@ -110,11 +130,10 @@ object E2EManager {
                 for (i in bytes.indices) { bytes[i] = seed[pos % seed.size]; pos++ }
             }
         }
-        kg.initialize(256, sr)
-        return kg.generateKeyPair()
+        kg.initialize(java.security.spec.NamedParameterSpec("Ed25519"), sr)
+        val pair = kg.generateKeyPair()
+        return KeyPair(pair.public, privateKey)
     }
-
-    fun generateIdentityKeyPair(): KeyPair = KeyPairGenerator.getInstance(Constants.ED25519_ALGO).generateKeyPair()
 
     fun signData(data: ByteArray, priv: PrivateKey): ByteArray {
         val sig = Signature.getInstance(Constants.ED25519_ALGO)
