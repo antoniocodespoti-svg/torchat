@@ -335,7 +335,7 @@ class MainActivity : ComponentActivity() {
                     val peerNonce = Base64.getDecoder().decode(pts[4])
                     if (peerNonce.size != 16) return
 
-                    val pending = handshakeManager.getAndRemove(nonceAStr) ?: return
+                    val pending = handshakeManager.peekPending(nonceAStr) ?: return
                     val myEphemeral = pending.myEphemeralKeys
                     val myNonce = pending.myNonce
                     val myIKStr = E2EManager.publicKeyToString(myIdentityKeyPair!!.public)
@@ -349,6 +349,9 @@ class MainActivity : ComponentActivity() {
                     // Alice (Initiator) verifies Bob's signature
                     val fullTranscript = E2EManager.buildHandshakeTranscript(myOnion, senderOnion, myIKStr, E2EManager.publicKeyToString(myEphemeral.public), peerIKStr, peerEKStr, myNonce, peerNonce)
                     if (!E2EManager.verifySignature(fullTranscript, peerSig, peerIdentityKey)) return
+
+                    // Signature verified! Now consume state (Audit Point 2)
+                    handshakeManager.removePending(nonceAStr)
 
                     // Alice signs same transcript - Step 3
                     val aliceSig = Base64.getEncoder().encodeToString(E2EManager.signData(fullTranscript, myIdentityKeyPair!!.private))
@@ -378,7 +381,7 @@ class MainActivity : ComponentActivity() {
                     val nonceAStr = pts[1] // This is Alice's nonce
                     val nonceBStr = pts[2] // This is Bob's nonce
 
-                    val pending = handshakeManager.getAndRemove(nonceAStr) ?: return
+                    val pending = handshakeManager.peekPending(nonceAStr) ?: return
                     val myNonce = pending.myNonce // Bob's nonce
                     val myEphemeral = pending.myEphemeralKeys
                     val peerNonce = pending.peerNonce ?: return // Alice's nonce
@@ -397,6 +400,9 @@ class MainActivity : ComponentActivity() {
                         Log.e(TAG, "Alice final signature verification failed")
                         return
                     }
+
+                    // Signature verified! Now consume state
+                    handshakeManager.removePending(nonceAStr)
 
                     // Commit Session Bob (Responder)
                     val sharedSecret = E2EManager.calculateSharedSecret(myEphemeral.private, E2EManager.stringToPublicKey(peerEKStr, Constants.X25519_ALGO))
@@ -475,10 +481,60 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun handleMediaPick(u: Uri, i: Boolean) { val p = activeChatPeer ?: return; val m = activeChatMessages ?: return; CoroutineScope(Dispatchers.IO).launch { val b = if (i) mediaManager.stripImageMetadata(u) else mediaManager.getFileBytes(u); b?.let { val b64 = Base64.getEncoder().encodeToString(it); withContext(Dispatchers.Main) { sendMessage(p, b64, m) } } } }
+    private fun handleMediaPick(uri: Uri, isImage: Boolean) {
+        val peer = activeChatPeer ?: return
+        val messageList = activeChatMessages ?: return
+
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                // P1 Fix: Check file size BEFORE reading into memory
+                val parcelFileDescriptor = contentResolver.openFileDescriptor(uri, "r")
+                val fileSize = parcelFileDescriptor?.statSize ?: 0L
+                parcelFileDescriptor?.close()
+
+                if (fileSize > 1 * 1024 * 1024) { // 1MB Limit
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(this@MainActivity, "File too large (max 1MB)", Toast.LENGTH_LONG).show()
+                    }
+                    return@launch
+                }
+
+                val bytes = if (isImage) mediaManager.stripImageMetadata(uri) else mediaManager.getFileBytes(uri)
+                bytes?.let {
+                    val b64 = Base64.getEncoder().encodeToString(it)
+                    withContext(Dispatchers.Main) {
+                        sendMessage(peer, b64, messageList)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Media pick error", e)
+            }
+        }
+    }
     private fun saveAttachmentToExternalStorage(f: String, b: String) { try { val bts = Base64.getDecoder().decode(b); val v = ContentValues().apply { put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, f) }; val uri = contentResolver.insert(if (Build.VERSION.SDK_INT >= 29) android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI else android.provider.MediaStore.Files.getContentUri("external"), v); uri?.let { contentResolver.openOutputStream(it)?.use { os -> os.write(bts) }; CoroutineScope(Dispatchers.Main).launch { Toast.makeText(this@MainActivity, "OK", Toast.LENGTH_SHORT).show() } } } catch (e: Exception) { } }
     private fun sanitizeOnionAddress(o: String): String = o.trim().removePrefix("http://").removePrefix("https://").removeSuffix("/")
-    private fun loadPeersFromPrefs(p: android.content.SharedPreferences): List<Peer> { val d = p.getString(Constants.KEY_SAVED_PEERS, null) ?: return emptyList(); return try { val json = if (d.startsWith("[")) d else { val h = p.getString(Constants.KEY_PASS_HASH, null); if (h != null) E2EManager.decrypt(d, E2EManager.deriveKeyFromSecret(h, getOrCreateSalt())) else d }; Gson().fromJson(json, object : TypeToken<List<Peer>>() {}.type) } catch (e: Exception) { emptyList() } }
+    private fun loadPeersFromPrefs(p: android.content.SharedPreferences): List<Peer> {
+        val d = p.getString(Constants.KEY_SAVED_PEERS, null) ?: return emptyList()
+        return try {
+            val h = p.getString(Constants.KEY_PASS_HASH, null)
+            if (h != null) {
+                // If we have a password, we MUST be able to decrypt. No plaintext loading (Audit P1).
+                val json = E2EManager.decrypt(d, E2EManager.deriveKeyFromSecret(h, getOrCreateSalt()))
+                Gson().fromJson(json, object : TypeToken<List<Peer>>() {}.type)
+            } else {
+                // If no password yet, we might be in initial setup or migration.
+                if (d.startsWith("[")) {
+                    Gson().fromJson(d, object : TypeToken<List<Peer>>() {}.type)
+                } else {
+                    emptyList()
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to load peers database", e)
+            emptyList()
+        }
+    }
+
     private fun savePeers() {
         val p = getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE)
         val j = Gson().toJson(peersList.toList())
@@ -488,15 +544,25 @@ class MainActivity : ComponentActivity() {
                 val data = E2EManager.encrypt(j, E2EManager.deriveKeyFromSecret(h, getOrCreateSalt()))
                 p.edit().putString(Constants.KEY_SAVED_PEERS, data).apply()
             } else {
-                // If not authenticated yet, we don't save or save temporarily?
-                // For security, never save unencrypted peers.
-                Log.w(TAG, "Postponing peers save: No password hash available.")
+                // P1: Never save plaintext peers once password is set or during runtime.
+                // In initial setup, we don't save until password is created.
+                Log.w(TAG, "Skipping peers save: Password hash not available yet.")
             }
         } catch (e: Exception) {
-            Log.e(TAG, "CRITICAL: Failed to encrypt and save peers database. Data is NOT saved.", e)
+            Log.e(TAG, "CRITICAL: Failed to encrypt peers database. Data is NOT saved to disk.", e)
         }
     }
-    private fun getOrCreateSalt(): ByteArray { val p = getSharedPreferences("secure_prefs_salt", Context.MODE_PRIVATE); val sEnc = p.getString("install_salt_enc", null) ?: return generateAndSaveSalt(p); return try { Base64.getDecoder().decode(E2EManager.decryptWithHardwareKey(sEnc).getOrThrow()) } catch (e: Exception) { generateAndSaveSalt(p) } }
+
+    private fun getOrCreateSalt(): ByteArray {
+        val p = getSharedPreferences("secure_prefs_salt", Context.MODE_PRIVATE)
+        val sEnc = p.getString("install_salt_enc", null) ?: return generateAndSaveSalt(p)
+        return try {
+            Base64.getDecoder().decode(E2EManager.decryptWithHardwareKey(sEnc).getOrThrow())
+        } catch (e: Exception) {
+            // P1: Decrypt failure -> HARD ERROR, not silent regeneration (Audit Point 11)
+            throw IllegalStateException("Secure storage (Hardware Keystore) is inaccessible.", e)
+        }
+    }
     private fun generateAndSaveSalt(p: android.content.SharedPreferences): ByteArray { val s = ByteArray(16).apply { SecureRandom().nextBytes(this) }; val enc = E2EManager.encryptWithHardwareKey(Base64.getEncoder().encodeToString(s)).getOrNull() ?: ""; p.edit().putString("install_salt_enc", enc).apply(); return s }
     private fun saveThemePreference(d: Boolean) { getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE).edit().putBoolean(Constants.KEY_DARK_THEME, d).apply() }
     private fun saveAvailabilityPreference(a: Boolean) { getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE).edit().putBoolean("is_available", a).apply() }

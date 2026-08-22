@@ -1,47 +1,37 @@
-# Specifica Protocollo TorChat E2EE (v2.6)
+# Specifica Protocollo TorChat E2EE (v2.7)
 
-Questo documento descrive il protocollo di crittografia end-to-end utilizzato da TorChat per la comunicazione sicura tra peer su rete Tor.
+Questo documento descrive il protocollo di crittografia end-to-end utilizzato da TorChat (v2.7+) per la comunicazione sicura.
 
-## 1. Handshake e Scambio Chiavi (3-Way Authenticated Exchange)
+## 1. Handshake e Pairing Atomico
 
-TorChat v2.6 utilizza un **Handshake a 3 vie** completamente autenticato e resistente al replay.
+TorChat v2.7 implementa un handshake a 3 vie con **consumo dello stato verificato**.
 
-### Fasi dell'Handshake:
-1.  **PFS_INIT (Alice)**: Alice genera `eA` (X25519) e `nA` (nonce 16 byte). Invia `eA_pub`, `ikA_pub`, `nA` e la firma di Alice sul transcript iniziale (`v2/init`).
-2.  **PFS_ACCEPT (Bob)**: Bob verifica la firma, genera `eB` (X25519) e `nB` (nonce 16 byte). Invia `eB_pub`, `ikB_pub`, `nA`, `nB` e la firma di Bob sul transcript completo (`v2/hand`).
-3.  **PFS_FINAL (Alice)**: Alice verifica la firma di Bob e invia la propria firma finale sul transcript completo.
+### Proprietà di Sicurezza:
+*   **Verify-before-Consume**: Lo stato dell'handshake pendente viene rimosso dal gestore solo **dopo** che la firma del peer è stata validata. Questo previene attacchi DoS che mirano a resettare i pairing legittimi tramite pacchetti contraffatti.
+*   **One-Time Tokens**: I token di pairing (QR) usano nonce a 128-bit a uso singolo, validati solo dopo la verifica della firma del token stesso.
 
-**Session ID**: `SHA256(Handshake Transcript completo)`.
+## 2. Double Ratchet Transazionale
 
-## 2. Algoritmo Double Ratchet
+L'algoritmo Double Ratchet garantisce *Forward Secrecy* e *Post-Compromise Security*.
 
-TorChat implementa l'algoritmo **Double Ratchet** standard per garantire Forward Secrecy e Post-Compromise Security.
+### 2.1 Gestione dello Stato (Rollback)
+La ricezione di ogni messaggio segue il pattern **Snapshot -> Try -> Commit**:
+1.  Viene creato uno snapshot dello stato corrente (Root Key, Chain Keys, contatori).
+2.  Si calcolano le chiavi derivate e si tenta la decifratura AES-256-GCM.
+3.  **Commit**: Se (e solo se) il tag di autenticazione GCM è valido, lo stato snapshot viene applicato come stato definitivo.
+4.  **Rollback**: In caso di errore, lo snapshot viene scartato e la sessione rimane sincronizzata all'ultimo stato valido.
 
-### 2.1 State Management Transazionale
-Lo stato della sessione (Root Key, Chain Keys, N, PN) viene aggiornato **solo dopo** che il messaggio ricevuto è stato autenticato con successo tramite il tag AES-GCM. Qualsiasi errore di decifratura comporta il rollback istantaneo allo stato precedente, prevenendo la corruzione della sessione.
+### 2.2 Header e AAD
+Ogni pacchetto include un header con `Ratchet_PK`, `PN` e `N`.
+I dati autenticati (AAD) includono: `versione | tipo | sequenza_rete | sessionID | onion_mittente | ratchet_pk | PN | N`.
 
-### 2.2 Header del Protocollo
-Ogni messaggio include un header contenente:
-*   `ratchet_public_key`: Chiave pubblica DH corrente del mittente.
-*   `pn`: Lunghezza della catena di invio precedente (Previous Counter).
-*   `n`: Numero del messaggio nella catena corrente (Message Counter).
+## 3. Hardening di Rete e DoS
 
-### 2.3 Derivazione delle Chiavi
-*   `KDF_Root(RK, DH_out) -> (Next_RK, CK)`
-*   `KDF_Chain(CK) -> (Next_CK, MessageKey)`
-*   Utilizza HKDF-SHA256 con separazione di dominio (`TorChat/v2/dr/...`).
+*   **Framing Flessibile**: I pacchetti di controllo (Handshake, Pong) possono avere una chiave ratchet di lunghezza zero. I pacchetti dati (Message, File) richiedono obbligatoriamente una chiave valida.
+*   **Validazione Contatori**: `PN` e `N` devono essere compresi tra `0` e `10000`.
+*   **Limiti Skipped Keys**: Massimo 1000 chiavi saltate memorizzate globalmente per sessione, con un gap massimo di 100 messaggi tra pacchetti consecutivi.
 
-## 3. Cifratura e AAD
+## 4. Identità e Storage
 
-*   **Algoritmo**: AES-256-GCM.
-*   **AAD (Additional Authenticated Data)**: Include versione, tipo, Session ID, sender Onion, ratchet key, PN e N. Questo garantisce che un messaggio sia legato indissolubilmente alla sessione e alla sua posizione nel ratchet.
-
-## 4. Identità Deterministica
-
-L'identità Ed25519 e l'indirizzo .onion sono derivati deterministicamente dal seme della mnemonica a 12 parole tramite HKDF-SHA256. Questo garantisce che il possesso della mnemonica sia sufficiente e necessario per recuperare l'intera identità crittografica.
-
-## 5. Protezioni Anti-DoS e Network
-
-*   **Handshake Limits**: Massimo 3 handshake pendenti per peer e 50 globali, con enforcement atomico.
-*   **Framing Validation**: Validazione rigorosa delle lunghezze dei campi prima di ogni allocazione di memoria.
-*   **Skipped Keys Limit**: Massimo 1000 chiavi saltate memorizzate per sessione, con un gap massimo di 100 messaggi.
+*   **Fail-Closed Policy**: Qualsiasi errore nel caricamento del seme mnemonico o nella decifratura del database peer (Hardware Keystore) blocca l'operazione invece di ricorrere a fallback insicuri (plaintext o semi casuali).
+*   **Limiti Allegati**: Gli allegati sono limitati a 1MB e la dimensione viene verificata **prima** del caricamento in memoria RAM.

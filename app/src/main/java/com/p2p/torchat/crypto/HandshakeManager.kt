@@ -26,7 +26,6 @@ class HandshakeManager(
     /**
      * Adds a new pending handshake if limits are not exceeded.
      * Performs automatic cleanup of expired handshakes.
-     * Operation is atomic to prevent race conditions in limit enforcement.
      */
     fun addPending(handshakeId: String, handshake: PendingHandshake): Boolean = synchronized(lock) {
         cleanupExpiredInternal()
@@ -52,8 +51,27 @@ class HandshakeManager(
     }
 
     /**
-     * Retrieves and removes a pending handshake by ID.
-     * Returns null if not found or expired.
+     * Peeks at a pending handshake without removing it.
+     * Useful for verification before consumption (Audit P0).
+     */
+    fun peekPending(handshakeId: String): PendingHandshake? = synchronized(lock) {
+        val handshake = pendingHandshakes[handshakeId] ?: return null
+        if (timeProvider() - handshake.createdAt > timeoutMs) {
+            cleanupExpiredInternal()
+            return null
+        }
+        return handshake
+    }
+
+    /**
+     * Explicitly removes a pending handshake after successful verification.
+     */
+    fun removePending(handshakeId: String): Boolean = synchronized(lock) {
+        return pendingHandshakes.remove(handshakeId) != null
+    }
+
+    /**
+     * Retrieves and removes a pending handshake by ID (Legacy method, use with care).
      */
     fun getAndRemove(handshakeId: String): PendingHandshake? = synchronized(lock) {
         val handshake = pendingHandshakes.remove(handshakeId) ?: return null

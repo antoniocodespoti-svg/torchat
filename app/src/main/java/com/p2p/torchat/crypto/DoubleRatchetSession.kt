@@ -173,21 +173,33 @@ class DoubleRatchetSession(
     private fun skipMessageKeysInternal(untilN: Int, tempMap: MutableMap<Pair<String, Int>, ByteArray>) {
         if (receiveChainKey == null) return
 
-        if (nRecv + (untilN - nRecv) > MAX_SKIPPED_KEYS) {
-            throw SecurityException("Too many messages skipped")
+        val gap = untilN - nRecv
+        if (gap < 0) {
+            throw SecurityException("Old or replayed message (n=$untilN, current=$nRecv)")
         }
 
-        if (untilN - nRecv > MAX_SKIP_GAP) {
-            throw SecurityException("Gap too large")
+        if (gap > MAX_SKIP_GAP) {
+            throw SecurityException("Message gap too large ($gap > $MAX_SKIP_GAP)")
+        }
+
+        if (skippedMessageKeys.size + tempMap.size + gap > MAX_SKIPPED_KEYS) {
+            throw SecurityException("Global skipped-key limit exceeded")
         }
 
         val currentPeerKeyStr = E2EManager.publicKeyToString(peerRatchetPublicKey!!)
-        while (nRecv < untilN) {
-            val (nextCK, mk) = E2EManager.kdfChain(receiveChainKey!!, "constant")
-            receiveChainKey = nextCK
-            tempMap[currentPeerKeyStr to nRecv] = mk
-            nRecv++
+        var tempN = nRecv
+        var tempCK = receiveChainKey!!
+
+        while (tempN < untilN) {
+            val (nextCK, mk) = E2EManager.kdfChain(tempCK, "constant")
+            tempCK = nextCK
+            tempMap[currentPeerKeyStr to tempN] = mk
+            tempN++
         }
+
+        // Update local pointers for the next steps in tryDecrypt
+        receiveChainKey = tempCK
+        nRecv = tempN
     }
 
     fun BobInit(peerPubKey: PublicKey) {

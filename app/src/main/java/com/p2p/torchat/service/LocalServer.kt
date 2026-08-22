@@ -117,19 +117,38 @@ class LocalServer(
 
                 // 6. Read Ratchet Public Key Length
                 val pubKeyLen = dis.readInt()
-                if (pubKeyLen <= 0 || pubKeyLen > MAX_RPK_LENGTH) {
-                    Log.w(TAG, "Ratchet key length too large: $pubKeyLen")
+                if (pubKeyLen < 0 || pubKeyLen > MAX_RPK_LENGTH) {
+                    Log.w(TAG, "Invalid ratchet key length: $pubKeyLen")
+                    return@launch
+                }
+
+                // P0 Fix: Some packet types (handshake, pong) don't require a ratchet key
+                val requiresRPK = type == com.p2p.torchat.model.PayloadType.CHAT_MESSAGE.ordinal.toByte() ||
+                                 type == com.p2p.torchat.model.PayloadType.IMAGE.ordinal.toByte() ||
+                                 type == com.p2p.torchat.model.PayloadType.FILE.ordinal.toByte()
+
+                if (requiresRPK && pubKeyLen == 0) {
+                    Log.w(TAG, "Ratchet key required for type $type but length is 0")
                     return@launch
                 }
 
                 // 7. Read Ratchet Public Key
-                val pubKeyBytes = ByteArray(pubKeyLen)
-                dis.readFully(pubKeyBytes)
-                val ratchetPubKey = String(pubKeyBytes, Charsets.UTF_8)
+                val ratchetPubKey = if (pubKeyLen > 0) {
+                    val pubKeyBytes = ByteArray(pubKeyLen)
+                    dis.readFully(pubKeyBytes)
+                    String(pubKeyBytes, Charsets.UTF_8)
+                } else {
+                    ""
+                }
 
                 // 8. Read PN & N (Double Ratchet Compliance)
                 val pn = dis.readInt()
                 val n = dis.readInt()
+
+                if (pn < 0 || n < 0 || pn > 10000 || n > 10000) {
+                    Log.w(TAG, "Invalid DR counters: pn=$pn, n=$n")
+                    return@launch
+                }
 
                 // 9. Read Payload Length
                 val length = dis.readInt()

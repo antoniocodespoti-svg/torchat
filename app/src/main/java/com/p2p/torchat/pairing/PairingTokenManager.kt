@@ -71,29 +71,30 @@ class PairingTokenManager(private val context: Context? = null) {
                 return null
             }
 
-            // 2. One-time use check (Audit Point 8)
+            // 2. Verify signature BEFORE consuming nonce (Audit P1)
+            val dataToVerify = "${signedToken.onion}|${signedToken.alias}|${signedToken.pubKey}|${signedToken.ts}|${signedToken.nonceB64}"
+            val pubKey = E2EManager.stringToPublicKey(signedToken.pubKey, Constants.ED25519_ALGO)
+            val sigBytes = Base64.getDecoder().decode(signedToken.sig)
+
+            if (!E2EManager.verifySignature(dataToVerify.toByteArray(StandardCharsets.UTF_8), sigBytes, pubKey)) {
+                return null
+            }
+
+            // 3. One-time use check (Audit Point 8)
             if (context != null) {
                 val prefs = context.getSharedPreferences("pairing_prefs", Context.MODE_PRIVATE)
                 if (prefs.contains(signedToken.nonceB64)) {
                     return null // Already used
                 }
                 prefs.edit().putBoolean(signedToken.nonceB64, true).apply()
-                // Cleanup old nonces would happen here in a real app
             }
 
-            // 3. Verify signature
-            val dataToVerify = "${signedToken.onion}|${signedToken.alias}|${signedToken.pubKey}|${signedToken.ts}|${signedToken.nonceB64}"
-            val pubKey = E2EManager.stringToPublicKey(signedToken.pubKey, Constants.ED25519_ALGO)
-            val sigBytes = Base64.getDecoder().decode(signedToken.sig)
-
-            if (E2EManager.verifySignature(dataToVerify.toByteArray(StandardCharsets.UTF_8), sigBytes, pubKey)) {
-                Peer(
-                    onionAddress = signedToken.onion,
-                    alias = signedToken.alias,
-                    identityPublicKey = signedToken.pubKey,
-                    isVerified = false
-                )
-            } else null
+            return Peer(
+                onionAddress = signedToken.onion,
+                alias = signedToken.alias,
+                identityPublicKey = signedToken.pubKey,
+                isVerified = false
+            )
         } catch (e: Exception) {
             null
         }
