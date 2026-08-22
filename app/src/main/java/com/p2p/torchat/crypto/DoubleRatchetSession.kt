@@ -96,9 +96,16 @@ class DoubleRatchetSession(
 
         // 1. Check skipped keys (out-of-order)
         skippedMessageKeys[pubKeyStr to header.n]?.let { key ->
-            val decrypted = decryptFn(encB64, key, aad)
-            skippedMessageKeys.remove(pubKeyStr to header.n)
-            return@withLock decrypted
+            try {
+                val decrypted = decryptFn(encB64, key, aad)
+                // Secure deletion of consumed skipped key (Audit P1)
+                key.fill(0)
+                skippedMessageKeys.remove(pubKeyStr to header.n)
+                return@withLock decrypted
+            } catch (e: Exception) {
+                // If decryption fails, keep the key in map (maybe corrupted packet, don't lose key yet)
+                throw e
+            }
         }
 
         // 2. Snapshot current state for potential rollback
@@ -130,6 +137,7 @@ class DoubleRatchetSession(
             val decrypted = decryptFn(encB64, mk, aad)
 
             // 7. Successful decryption: Commit state and add temp skipped keys
+            mk.fill(0) // Securely wipe temporary message key (Audit P1)
             receiveChainKey = nextCK
             nRecv++
             skippedMessageKeys.putAll(tempSkipped)
@@ -146,6 +154,9 @@ class DoubleRatchetSession(
             nSend = snapshotNSend
             nRecv = snapshotNRecv
             pn = snapshotPN
+
+            // Wipe temp skipped keys on failure
+            tempSkipped.values.forEach { it.fill(0) }
             throw e
         }
     }

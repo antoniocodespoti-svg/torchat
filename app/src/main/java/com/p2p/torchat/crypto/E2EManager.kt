@@ -109,7 +109,7 @@ object E2EManager {
 
     /**
      * Derives an Ed25519 KeyPair deterministically from a 32-byte seed.
-     * Resolves Audit Point 4 using standard PKCS#8 encoding.
+     * Standard-compliant Ed25519 seed-to-key mapping.
      */
     fun ed25519KeyPairFromSeed(seed: ByteArray): KeyPair {
         require(seed.size == 32) { "Seed must be 32 bytes" }

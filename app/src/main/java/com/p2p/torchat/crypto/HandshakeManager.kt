@@ -51,23 +51,25 @@ class HandshakeManager(
     }
 
     /**
-     * Peeks at a pending handshake without removing it.
-     * Useful for verification before consumption (Audit P0).
+     * Atomically verifies a pending handshake and consumes it if the verifier returns true.
+     * Resolves Audit P1 (Race condition in handshake consumption).
      */
-    fun peekPending(handshakeId: String): PendingHandshake? = synchronized(lock) {
-        val handshake = pendingHandshakes[handshakeId] ?: return null
-        if (timeProvider() - handshake.createdAt > timeoutMs) {
-            cleanupExpiredInternal()
-            return null
-        }
-        return handshake
-    }
+    fun verifyAndConsume(handshakeId: String, verifier: (PendingHandshake) -> Boolean): Boolean = synchronized(lock) {
+        val handshake = pendingHandshakes[handshakeId] ?: return false
 
-    /**
-     * Explicitly removes a pending handshake after successful verification.
-     */
-    fun removePending(handshakeId: String): Boolean = synchronized(lock) {
-        return pendingHandshakes.remove(handshakeId) != null
+        // 1. Check expiration
+        if (timeProvider() - handshake.createdAt > timeoutMs) {
+            pendingHandshakes.remove(handshakeId)
+            return false
+        }
+
+        // 2. Perform verification
+        if (verifier(handshake)) {
+            pendingHandshakes.remove(handshakeId)
+            return true
+        }
+
+        return false
     }
 
     /**
