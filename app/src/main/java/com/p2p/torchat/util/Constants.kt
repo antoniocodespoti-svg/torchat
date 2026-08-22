@@ -18,7 +18,8 @@ object Constants {
     const val KEY_PUBLIC_KEY = "my_public_key"
     const val KEY_IDENTITY_SEED_ENC = "my_identity_seed_enc"
     const val KEY_SAVED_PEERS = "saved_peers"
-    const val KEY_SAVED_SEED = "saved_seed"
+    const val KEY_SAVED_SEED = "saved_seed" // Plaintext - TO BE REMOVED
+    const val KEY_SAVED_SEED_ENC = "saved_seed_enc" // Encrypted with password
     const val KEY_AVAILABILITY = "is_available"
     const val KEY_MASTER_KEY_ALIAS = "torchat_master_key"
 

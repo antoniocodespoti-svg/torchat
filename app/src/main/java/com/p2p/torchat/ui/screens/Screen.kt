@@ -16,4 +16,5 @@ sealed class Screen {
     data class Verification(val peer: Peer) : Screen()
     object QRCode : Screen()
     object QRScanner : Screen()
+    object Recovery : Screen()
 }

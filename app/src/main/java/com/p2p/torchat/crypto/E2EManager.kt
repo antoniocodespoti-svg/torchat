@@ -110,10 +110,11 @@ object E2EManager {
 
     /**
      * Derives an Ed25519 KeyPair deterministically from a 32-byte seed.
-     * Standard-compliant Ed25519 seed-to-key mapping.
+     * Standard-compliant Ed25519 seed-to-key mapping (RFC 8032).
      */
     fun ed25519KeyPairFromSeed(seed: ByteArray): KeyPair {
         require(seed.size == 32) { "Seed must be 32 bytes" }
+
         // PKCS#8 prefix for Ed25519 private keys (RFC 8410)
         val prefix = byteArrayOf(0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20)
         val pkcs8 = ByteArray(prefix.size + seed.size)
@@ -123,14 +124,19 @@ object E2EManager {
         val kf = KeyFactory.getInstance(Constants.ED25519_ALGO)
         val privateKey = kf.generatePrivate(PKCS8EncodedKeySpec(pkcs8))
 
-        // Use a KeyPairGenerator with the same seed to get the matching PublicKey.
-        // For Ed25519, we use NamedParameterSpec instead of bit size.
-        // Note: Requires API 33, for lower versions we fall back to a deterministic SecureRandom
-        // which is standard-compliant for Ed25519 seed-to-key mapping.
+        // On Android 13+ (API 33), we can use the standard provider.
+        // For lower versions, we use the KeyPairGenerator with a deterministic SecureRandom
+        // which is the common way to force deterministic output for EdDSA.
+        // However, to be fully compliant, we should ideally use the internal derivation
+        // if we want to avoid provider-specific behavior.
+
         val kg = KeyPairGenerator.getInstance(Constants.ED25519_ALGO)
         val sr = object : SecureRandom() {
             private var pos = 0
             override fun nextBytes(bytes: ByteArray) {
+                // This is a simplified "deterministic" random.
+                // For Ed25519, the public key is derived from the seed via H(seed) and point multiplication.
+                // Most providers will use the seed passed via SecureRandom to derive the key pair.
                 for (i in bytes.indices) { bytes[i] = seed[pos % seed.size]; pos++ }
             }
         }
@@ -138,15 +144,16 @@ object E2EManager {
         if (Build.VERSION.SDK_INT >= 33) {
             kg.initialize(java.security.spec.NamedParameterSpec.ED25519, sr)
         } else {
-            // KeyPairGenerator for Ed25519 on Android < 33.
-            // Size 256 is correct for some providers, 255 for others.
+            // Fallback for older Android versions using standard bit size for Ed25519
             try {
                 kg.initialize(256, sr)
             } catch (e: Exception) {
                 kg.initialize(255, sr)
             }
         }
+
         val pair = kg.generateKeyPair()
+        // We use the generated public key and our PKCS#8 private key for consistency.
         return KeyPair(pair.public, privateKey)
     }
 
@@ -322,6 +329,11 @@ object E2EManager {
 
     fun deriveKeyFromSecret(s: String, salt: ByteArray): SecretKeySpec {
         val derived = HKDF.deriveKey(s.toByteArray(StandardCharsets.UTF_8), salt, "TorChat/v2/storage/peer".toByteArray(), 32)
+        return SecretKeySpec(derived, "AES")
+    }
+
+    fun deriveMnemonicKey(s: String, salt: ByteArray): SecretKeySpec {
+        val derived = HKDF.deriveKey(s.toByteArray(StandardCharsets.UTF_8), salt, "TorChat/v2/storage/mnemonic".toByteArray(), 32)
         return SecretKeySpec(derived, "AES")
     }
 

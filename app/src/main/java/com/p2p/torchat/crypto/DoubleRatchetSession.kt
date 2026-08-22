@@ -220,4 +220,18 @@ class DoubleRatchetSession(
         rootKey = newRoot
         receiveChainKey = newRecvCK
     }
+
+    /**
+     * Securely wipes all cryptographic material from RAM.
+     * Resolves Audit Point 14.
+     */
+    suspend fun destroy() = mutex.withLock {
+        rootKey.fill(0)
+        sendChainKey?.fill(0)
+        receiveChainKey?.fill(0)
+        skippedMessageKeys.values.forEach { it.fill(0) }
+        skippedMessageKeys.clear()
+        // Note: myRatchetKeyPair.private might not be directly wipeable depending on Provider,
+        // but we've zeroed the keys derived from it.
+    }
 }

@@ -92,7 +92,8 @@ class PairingTokenManager(private val context: Context? = null) {
                     if (prefs.contains(signedToken.nonceB64)) {
                         return null // Already used
                     }
-                    prefs.edit().putBoolean(signedToken.nonceB64, true).apply()
+                    val success = prefs.edit().putBoolean(signedToken.nonceB64, true).commit()
+                    if (!success) return null // P1: Ensure persistence
                 }
             }
 

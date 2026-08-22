@@ -21,39 +21,49 @@ class ChatRepository(
         val session = activeSessions[peer.onionAddress] ?: return Result.failure(Exception("No active session"))
         val myOnion = (torManager.torState.value as? TorState.Running)?.onionAddress ?: return Result.failure(Exception("Tor not running"))
 
-        val sendResult = session.nextSendKey()
-        val header = sendResult.header
-        val rpkStr = E2EManager.publicKeyToString(header.ratchetPublicKey)
-        val msgSeq = ++networkSequence
-        val aad = E2EManager.buildAAD(1, PayloadType.CHAT_MESSAGE.ordinal.toByte(), msgSeq, myOnion, session.sessionId, rpkStr, header.pn, header.n)
-        val encrypted = E2EManager.encryptV2(content, sendResult.messageKey, aad)
+        return try {
+            val sendResult = session.nextSendKey()
+            val header = sendResult.header
+            val rpkStr = E2EManager.publicKeyToString(header.ratchetPublicKey)
+            val msgSeq = ++networkSequence
 
-        val msg = Message(
-            id = UUID.randomUUID().toString(),
-            senderOnion = myOnion,
-            recipientOnion = peer.onionAddress,
-            content = content,
-            timestamp = System.currentTimeMillis(),
-            isOutgoing = true,
-            type = PayloadType.CHAT_MESSAGE,
-            sequenceNumber = msgSeq
-        )
+            val aad = E2EManager.buildAAD(1, PayloadType.CHAT_MESSAGE.ordinal.toByte(), msgSeq, myOnion, session.sessionId, rpkStr, header.pn, header.n)
+            val encrypted = try {
+                E2EManager.encryptV2(content, sendResult.messageKey, aad)
+            } finally {
+                // Securely wipe message key after encryption (Audit P5)
+                sendResult.messageKey.fill(0)
+            }
 
-        val res = p2pMessenger.sendEncryptedPayload(
-            myOnion = myOnion,
-            recipientOnion = peer.onionAddress,
-            type = PayloadType.CHAT_MESSAGE.ordinal.toByte(),
-            sequenceNumber = msgSeq,
-            ratchetPubKey = rpkStr,
-            pn = header.pn,
-            n = header.n,
-            encryptedDataB64 = encrypted
-        )
+            val msg = Message(
+                id = UUID.randomUUID().toString(),
+                senderOnion = myOnion,
+                recipientOnion = peer.onionAddress,
+                content = content,
+                timestamp = System.currentTimeMillis(),
+                isOutgoing = true,
+                type = PayloadType.CHAT_MESSAGE,
+                sequenceNumber = msgSeq
+            )
 
-        return if (res.isSuccess) {
-            Result.success(msg.copy(isDelivered = true))
-        } else {
-            Result.success(msg.copy(isError = true))
+            val res = p2pMessenger.sendEncryptedPayload(
+                myOnion = myOnion,
+                recipientOnion = peer.onionAddress,
+                type = PayloadType.CHAT_MESSAGE.ordinal.toByte(),
+                sequenceNumber = msgSeq,
+                ratchetPubKey = rpkStr,
+                pn = header.pn,
+                n = header.n,
+                encryptedDataB64 = encrypted
+            )
+
+            if (res.isSuccess) {
+                Result.success(msg.copy(isDelivered = true))
+            } else {
+                Result.success(msg.copy(isError = true))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
         }
     }
 }
