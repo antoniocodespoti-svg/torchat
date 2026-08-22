@@ -1,6 +1,5 @@
 package com.p2p.torchat.service
 
-import com.p2p.torchat.model.NetworkPayload
 import com.p2p.torchat.util.Constants
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -9,6 +8,7 @@ import java.net.InetSocketAddress
 import java.net.Proxy
 import java.net.Socket
 import kotlin.random.Random
+import kotlin.time.Duration.Companion.milliseconds
 
 /**
  * Hardened P2PMessenger with Binary Framing (NET-001).
@@ -47,7 +47,7 @@ class P2PMessenger(
         if (ratchetPubKey.length > 1024) return Result.failure(IllegalArgumentException("Ratchet key too long"))
 
         // Add random jitter to obscure traffic patterns
-        kotlinx.coroutines.delay(Random.nextLong(100, 500))
+        kotlinx.coroutines.delay(Random.nextLong(100, 500).milliseconds)
 
         return withContext(Dispatchers.IO) {
             try {
@@ -91,7 +91,7 @@ class P2PMessenger(
                 dos.flush()
 
                 socket.close()
-                Result.success(true)
+                Result.success(value = true)
             } catch (e: Exception) {
                 Result.failure(e)
             }

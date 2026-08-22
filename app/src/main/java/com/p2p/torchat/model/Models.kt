@@ -72,5 +72,36 @@ data class PendingHandshake(
     val peerNonce: ByteArray? = null,
     val peerIdentityKeyStr: String? = null,
     val peerEphemeralKeyStr: String? = null,
-    val createdAt: Long
-)
+    val createdAt: Long,
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (javaClass != other?.javaClass) return false
+
+        other as PendingHandshake
+
+        if (peerOnion != other.peerOnion) return false
+        if (myEphemeralKeys != other.myEphemeralKeys) return false
+        if (!myNonce.contentEquals(other.myNonce)) return false
+        if (peerNonce != null) {
+            if (other.peerNonce == null) return false
+            if (!peerNonce.contentEquals(other.peerNonce)) return false
+        } else if (other.peerNonce != null) return false
+        if (peerIdentityKeyStr != other.peerIdentityKeyStr) return false
+        if (peerEphemeralKeyStr != other.peerEphemeralKeyStr) return false
+        if (createdAt != other.createdAt) return false
+
+        return true
+    }
+
+    override fun hashCode(): Int {
+        var result = peerOnion.hashCode()
+        result = 31 * result + myEphemeralKeys.hashCode()
+        result = 31 * result + myNonce.contentHashCode()
+        result = 31 * result + (peerNonce?.contentHashCode() ?: 0)
+        result = 31 * result + (peerIdentityKeyStr?.hashCode() ?: 0)
+        result = 31 * result + (peerEphemeralKeyStr?.hashCode() ?: 0)
+        result = 31 * result + createdAt.hashCode()
+        return result
+    }
+}

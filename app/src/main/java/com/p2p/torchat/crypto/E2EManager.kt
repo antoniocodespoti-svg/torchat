@@ -3,7 +3,6 @@ package com.p2p.torchat.crypto
 import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
-import android.util.Log
 import com.lambdapioneer.argon2kt.Argon2Kt
 import com.lambdapioneer.argon2kt.Argon2Mode
 import com.p2p.torchat.util.Constants
@@ -25,7 +24,6 @@ import javax.crypto.spec.SecretKeySpec
  * E2EE v2 Manager - Audit Compliant Version.
  */
 object E2EManager {
-    private const val TAG = "E2EManager"
     private const val ANDROID_KEYSTORE = "AndroidKeyStore"
     private val argon2 by lazy { Argon2Kt() }
 
@@ -79,10 +77,13 @@ object E2EManager {
         val ks = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
         if (!ks.containsAlias(Constants.KEY_MASTER_KEY_ALIAS)) {
             val kg = KeyGenerator.getInstance("AES", ANDROID_KEYSTORE)
-            kg.init(KeyGenParameterSpec.Builder(Constants.KEY_MASTER_KEY_ALIAS, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
-                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                .setKeySize(Constants.AES_KEY_SIZE).build())
+            kg.init(
+                KeyGenParameterSpec.Builder(Constants.KEY_MASTER_KEY_ALIAS, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
+                    .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                    .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                    .setKeySize(Constants.AES_KEY_SIZE)
+                    .build()
+            )
             return kg.generateKey()
         }
         return (ks.getEntry(Constants.KEY_MASTER_KEY_ALIAS, null) as KeyStore.SecretKeyEntry).secretKey
@@ -98,7 +99,7 @@ object E2EManager {
     fun deriveKeyFromPassword(password: String, salt: ByteArray): SecretKeySpec {
         val result = argon2.hash(Argon2Mode.ARGON2_ID, password.toByteArray(), salt, Constants.ARGON2_ITERATIONS, Constants.ARGON2_MEMORY, Constants.ARGON2_PARALLELISM, Constants.ARGON2_HASH_LENGTH)
         val raw = ByteArray(Constants.ARGON2_HASH_LENGTH)
-        result.rawHash.get(raw)
+        result.rawHash[raw]
         return SecretKeySpec(raw, "AES")
     }
 
@@ -172,11 +173,6 @@ object E2EManager {
         return ka.generateSecret()
     }
 
-    fun kdfRatchet(key: ByteArray, label: String): Pair<ByteArray, ByteArray> {
-        val derived = HKDF.deriveKey(key, null, "TorChat/v2/ratchet/$label".toByteArray(StandardCharsets.UTF_8), 64)
-        return derived.sliceArray(0..31) to derived.sliceArray(32..63)
-    }
-
     /**
      * Double Ratchet KDF for Root Chain.
      * KDF_Root(RK, DH_out) -> (Next_RK, CK)
@@ -193,16 +189,6 @@ object E2EManager {
     fun kdfChain(chainKey: ByteArray, label: String): Pair<ByteArray, ByteArray> {
         val derived = HKDF.deriveKey(chainKey, null, "TorChat/v2/dr/chain/$label".toByteArray(StandardCharsets.UTF_8), 64)
         return derived.sliceArray(0..31) to derived.sliceArray(32..63)
-    }
-
-    fun deriveInitialChainKeys(sharedSecret: ByteArray, myOnion: String, peerOnion: String): Pair<ByteArray, ByteArray> {
-        val infoSend = "TorChat/v2/chain/$myOnion->$peerOnion".toByteArray()
-        val infoReceive = "TorChat/v2/chain/$peerOnion->$myOnion".toByteArray()
-
-        val sendChain = HKDF.deriveKey(sharedSecret, null, infoSend, 32)
-        val receiveChain = HKDF.deriveKey(sharedSecret, null, infoReceive, 32)
-
-        return sendChain to receiveChain
     }
 
     fun buildHandshakeTranscript(
@@ -355,5 +341,10 @@ object E2EManager {
         return String(cp.doFinal(enc), StandardCharsets.UTF_8)
     }
 
-    fun getFingerprint(pk: PublicKey): String = MessageDigest.getInstance(Constants.SHA256_ALGO).digest(pk.encoded).joinToString("") { "%02X".format(it) }.chunked(4).take(6).joinToString("-")
+    fun getFingerprint(pk: PublicKey): String = MessageDigest.getInstance(Constants.SHA256_ALGO).digest(pk.encoded)
+        .joinToString("") { "%02X".format(it) }
+        .chunked(4)
+        .asSequence()
+        .take(6)
+        .joinToString("-")
 }

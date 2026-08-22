@@ -50,7 +50,7 @@ class LocalServer(
     private val activeConnections = AtomicInteger(0)
 
     fun startServer() {
-        if (serverJob != null && serverJob!!.isActive) return
+        if (serverJob != null && serverJob?.isActive == true) return
 
         serverJob = CoroutineScope(Dispatchers.IO).launch {
             try {
@@ -97,7 +97,7 @@ class LocalServer(
 
                 // 4. Read Sender Onion Length
                 val onionLen = dis.readInt()
-                if (onionLen <= 0 || onionLen > MAX_ONION_LENGTH) {
+                if (onionLen !in 1..MAX_ONION_LENGTH) {
                     Log.w(TAG, "Onion length too large: $onionLen")
                     return@launch
                 }
@@ -117,7 +117,7 @@ class LocalServer(
 
                 // 6. Read Ratchet Public Key Length
                 val pubKeyLen = dis.readInt()
-                if (pubKeyLen < 0 || pubKeyLen > MAX_RPK_LENGTH) {
+                if (pubKeyLen !in 0..MAX_RPK_LENGTH) {
                     Log.w(TAG, "Invalid ratchet key length: $pubKeyLen")
                     return@launch
                 }
@@ -145,14 +145,14 @@ class LocalServer(
                 val pn = dis.readInt()
                 val n = dis.readInt()
 
-                if (pn < 0 || n < 0 || pn > 10000 || n > 10000) {
+                if (pn !in 0..10000 || n !in 0..10000) {
                     Log.w(TAG, "Invalid DR counters: pn=$pn, n=$n")
                     return@launch
                 }
 
                 // 9. Read Payload Length
                 val length = dis.readInt()
-                if (length <= 0 || length > MAX_PAYLOAD_SIZE) {
+                if (length !in 1..MAX_PAYLOAD_SIZE) {
                     Log.w(TAG, "Invalid payload length: $length")
                     return@launch
                 }

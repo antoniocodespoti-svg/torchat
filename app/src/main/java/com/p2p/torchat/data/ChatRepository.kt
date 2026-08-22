@@ -1,7 +1,5 @@
 package com.p2p.torchat.data
 
-import androidx.compose.runtime.mutableStateListOf
-import androidx.compose.runtime.mutableStateMapOf
 import com.p2p.torchat.crypto.E2EManager
 import com.p2p.torchat.crypto.DoubleRatchetSession
 import com.p2p.torchat.model.Message
@@ -14,11 +12,9 @@ import java.util.UUID
 
 class ChatRepository(
     private val p2pMessenger: P2PMessenger,
-    private val torManager: TorManager
+    private val torManager: TorManager,
 ) {
     val activeSessions = mutableMapOf<String, DoubleRatchetSession>()
-    val messagesMap = mutableMapOf<String, MutableList<Message>>()
-    val peersList = mutableListOf<Peer>()
     private var networkSequence = 0
 
     suspend fun sendMessage(peer: Peer, content: String): Result<Message> {

@@ -2,6 +2,7 @@ package com.p2p.torchat.service
 
 import android.content.Context
 import android.content.Intent
+import androidx.core.content.edit
 import com.p2p.torchat.util.Constants
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -65,13 +66,13 @@ class TorManager(private val context: Context) {
                 output.flush()
 
                 val version = input.readByte()
-                val method = input.readByte()
+                input.readByte() // Skip method byte
 
                 socket.close()
 
                 if (version == 0x05.toByte()) {
                     _torState.value = TorState.Running(onionAddress, Constants.TOR_SOCKS_PORT)
-                    prefs.edit().putString(Constants.KEY_ONION, onionAddress).apply()
+                    prefs.edit { putString(Constants.KEY_ONION, onionAddress) }
                 } else {
                     _torState.value = TorState.Error("Invalid SOCKS version: $version")
                 }

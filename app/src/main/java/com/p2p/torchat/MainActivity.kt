@@ -12,10 +12,6 @@ import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.activity.viewModels
-import com.p2p.torchat.ui.viewmodel.AuthViewModel
-import com.p2p.torchat.ui.viewmodel.ChatViewModel
-import com.p2p.torchat.data.ChatRepository
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.fillMaxSize
@@ -24,6 +20,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
+import androidx.core.content.edit
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import com.p2p.torchat.crypto.*
@@ -43,7 +40,11 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.UUID
 
 class MainActivity : ComponentActivity() {
-    private val TAG = Constants.TAG
+
+    companion object {
+        private const val TAG = Constants.TAG
+    }
+
     private lateinit var torManager: TorManager
     private lateinit var p2pMessenger: P2PMessenger
     private lateinit var notificationHelper: NotificationHelper
@@ -51,10 +52,6 @@ class MainActivity : ComponentActivity() {
     private lateinit var mediaManager: MediaManager
     private val totpManager = TotpManager()
     private val timeFetcher = NetworkTimeFetcher()
-
-    private val authViewModel: AuthViewModel by viewModels()
-    private val chatRepository by lazy { ChatRepository(p2pMessenger, torManager) }
-    private val chatViewModel: ChatViewModel by lazy { ChatViewModel(chatRepository) }
 
     private var myIdentityKeyPair: KeyPair? = null
     private val activeSessions = mutableStateMapOf<String, DoubleRatchetSession>()
@@ -71,14 +68,14 @@ class MainActivity : ComponentActivity() {
     private var isAuthenticated by mutableStateOf(false)
     private var isTermsAccepted by mutableStateOf(false)
     private var savedPasswordHash by mutableStateOf<String?>(null)
-    private var failedAttempts by mutableStateOf(0)
+    private var failedAttempts by mutableIntStateOf(0)
     private var currentSeed by mutableStateOf<List<String>>(emptyList())
 
     private var myAlias by mutableStateOf("Amico")
     private var isDarkTheme by mutableStateOf(true)
     private var isAutoBackupEnabled by mutableStateOf(false)
     private var isAvailable by mutableStateOf(false)
-    private var expiryDate by mutableStateOf(0L)
+    private var expiryDate by mutableLongStateOf(0L)
 
     private var peerToConfirmWithKey by mutableStateOf<Triple<String, String, String>?>(null)
     private var activeChatPeer: Peer? = null
@@ -103,7 +100,7 @@ class MainActivity : ComponentActivity() {
         localServer.startServer()
 
         if (torManager.isOrbotInstalled()) {
-            val s = getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE).getString(Constants.KEY_ONION, null)
+            val s = getSharedPreferences(Constants.PREFS_NAME, MODE_PRIVATE).getString(Constants.KEY_ONION, null)
             if (s != null) torManager.setTorRunning(s) else orbotLauncher.launch(torManager.getOrbotRequestIntent())
         }
 
@@ -140,13 +137,13 @@ class MainActivity : ComponentActivity() {
                 is Screen.ChangePassword -> AuthScreen(AuthMode.CHANGE, onAuthSuccess = { handleChangePassword(it) }) { currentScreenState = Screen.Settings }
                 is Screen.SeedBackup -> {
                     if (currentSeed.isEmpty()) {
-                        val p = getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE)
+                        val p = getSharedPreferences(Constants.PREFS_NAME, MODE_PRIVATE)
                         val saved = p.getString(Constants.KEY_SAVED_SEED, null)
                         currentSeed = if (saved != null) saved.split(" ") else MnemonicManager.generateMnemonic()
                     }
                     SeedScreen(SeedMode.DISPLAY, currentSeed, { handleExportInternal() }, { currentScreenState = Screen.Home })
                 }
-                is Screen.SeedRestore -> SeedScreen(SeedMode.INPUT, emptyList<String>(), { handleSeedRestore(it) }, { currentScreenState = Screen.Settings })
+                is Screen.SeedRestore -> SeedScreen(SeedMode.INPUT, emptyList(), { handleSeedRestore(it) }, { currentScreenState = Screen.Settings })
             }
         }
     }
@@ -200,7 +197,13 @@ class MainActivity : ComponentActivity() {
         currentScreenState = Screen.Home
     }
 
-    private fun handleTermsAccept() { isTermsAccepted = true; getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE).edit().putBoolean(Constants.KEY_TERMS_ACCEPTED, true).apply(); currentScreenState = Screen.Auth }
+    private fun handleTermsAccept() {
+        isTermsAccepted = true
+        getSharedPreferences(Constants.PREFS_NAME, MODE_PRIVATE).edit {
+            putBoolean(Constants.KEY_TERMS_ACCEPTED, true)
+        }
+        currentScreenState = Screen.Auth
+    }
     private fun handleChangePassword(data: String): Boolean { val p = data.removePrefix("VERIFY:").split("|"); if (E2EManager.verifyPassword(p[0], savedPasswordHash ?: "")) { val h = E2EManager.hashPassword(p[1]); savePasswordHash(h); savedPasswordHash = h; currentScreenState = Screen.Settings; return true } else return false }
     private fun handleSeedRestore(seed: List<String>) { if (MnemonicManager.isValidMnemonic(seed)) { currentSeed = seed; importBackupLauncher.launch(arrayOf("application/json")) } }
     private fun handleDeleteSession(peer: Peer, messages: MutableList<Message>) { activeSessions.remove(peer.onionAddress); messages.clear(); currentScreenState = Screen.Home }
@@ -221,7 +224,11 @@ class MainActivity : ComponentActivity() {
         try {
             contentResolver.openInputStream(uri)?.use { i ->
                 val pkg = BufferedReader(InputStreamReader(i)).readText()
-                if (backupManager.restoreFromEncryptedBackup(pkg, currentSeed)) { finish(); startActivity(intent) }
+                if (backupManager.restoreFromEncryptedBackup(pkg, currentSeed)) {
+                    finish()
+                    val restartIntent = Intent(this, MainActivity::class.java)
+                    startActivity(restartIntent)
+                }
             }
         } catch (e: Exception) { Log.e(TAG, "Import error", e) }
     }
@@ -244,7 +251,19 @@ class MainActivity : ComponentActivity() {
                                     E2EManager.decryptV2(enc, key, a)
                                 }
 
-                                val msg = Message(UUID.randomUUID().toString(), onion, (torManager.torState.value as? TorState.Running)?.onionAddress ?: "", dec, System.currentTimeMillis(), false, true, false, PayloadType.entries[packet.type.toInt()], null, packet.sequenceNumber)
+                                val msg = Message(
+                                    id = UUID.randomUUID().toString(),
+                                    senderOnion = onion,
+                                    recipientOnion = (torManager.torState.value as? TorState.Running)?.onionAddress ?: "",
+                                    content = dec,
+                                    timestamp = System.currentTimeMillis(),
+                                    isOutgoing = false,
+                                    isDelivered = true,
+                                    isError = false,
+                                    type = PayloadType.entries[packet.type.toInt()],
+                                    attachment = null,
+                                    sequenceNumber = packet.sequenceNumber
+                                )
                                 messagesMap.getOrPut(onion) { mutableStateListOf() }.add(msg)
                                 if (currentScreenState !is Screen.Chat || (currentScreenState as Screen.Chat).peer.onionAddress != onion) unreadCounts[onion] = (unreadCounts[onion] ?: 0) + 1
                                 notificationHelper.showChatNotification(peersList.find { it.onionAddress == onion }?.alias ?: "Contatto", "Nuovo messaggio")
@@ -425,7 +444,7 @@ class MainActivity : ComponentActivity() {
         Log.i(TAG, "Hardware Keystore backed: $isHardware")
     }
     private fun loadPreferences() {
-        val p = getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE)
+        val p = getSharedPreferences(Constants.PREFS_NAME, MODE_PRIVATE)
         myAlias = p.getString(Constants.KEY_MY_ALIAS, "Amico") ?: "Amico"
         isDarkTheme = p.getBoolean(Constants.KEY_DARK_THEME, true)
         isAutoBackupEnabled = p.getBoolean(Constants.KEY_AUTO_BACKUP, false)
@@ -533,16 +552,14 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun savePeers() {
-        val p = getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE)
+        val p = getSharedPreferences(Constants.PREFS_NAME, MODE_PRIVATE)
         val j = Gson().toJson(peersList.toList())
         try {
             val h = p.getString(Constants.KEY_PASS_HASH, null)
             if (h != null) {
                 val data = E2EManager.encrypt(j, E2EManager.deriveKeyFromSecret(h, getOrCreateSalt()))
-                p.edit().putString(Constants.KEY_SAVED_PEERS, data).apply()
+                p.edit { putString(Constants.KEY_SAVED_PEERS, data) }
             } else {
-                // P1: Never save plaintext peers once password is set or during runtime.
-                // In initial setup, we don't save until password is created.
                 Log.w(TAG, "Skipping peers save: Password hash not available yet.")
             }
         } catch (e: Exception) {
@@ -551,41 +568,37 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun getOrCreateSalt(): ByteArray {
-        val p = getSharedPreferences("secure_prefs_salt", Context.MODE_PRIVATE)
+        val p = getSharedPreferences("secure_prefs_salt", MODE_PRIVATE)
         val sEnc = p.getString("install_salt_enc", null) ?: return generateAndSaveSalt(p)
         return try {
             Base64.getDecoder().decode(E2EManager.decryptWithHardwareKey(sEnc).getOrThrow())
         } catch (e: Exception) {
-            // P1: Decrypt failure -> HARD ERROR, not silent regeneration (Audit Point 11)
             throw IllegalStateException("Secure storage (Hardware Keystore) is inaccessible.", e)
         }
     }
-    private fun generateAndSaveSalt(p: android.content.SharedPreferences): ByteArray { val s = ByteArray(16).apply { SecureRandom().nextBytes(this) }; val enc = E2EManager.encryptWithHardwareKey(Base64.getEncoder().encodeToString(s)).getOrNull() ?: ""; p.edit().putString("install_salt_enc", enc).apply(); return s }
-    private fun saveThemePreference(d: Boolean) { getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE).edit().putBoolean(Constants.KEY_DARK_THEME, d).apply() }
-    private fun saveAvailabilityPreference(a: Boolean) { getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE).edit().putBoolean("is_available", a).apply() }
-    private fun savePasswordHash(h: String) { getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE).edit().putString(Constants.KEY_PASS_HASH, h).apply() }
-    private fun saveFailedAttempts(a: Int) { getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE).edit().putInt(Constants.KEY_FAILED_ATTEMPTS, a).apply() }
-    private fun saveExpiryDate(d: Long) { getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE).edit().putLong(Constants.KEY_EXPIRY, d).apply() }
-    private fun saveAutoBackupPreference(e: Boolean) { getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE).edit().putBoolean(Constants.KEY_AUTO_BACKUP, e).apply() }
-    private fun saveMyAlias(a: String) { getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE).edit().putString(Constants.KEY_MY_ALIAS, a).apply() }
+    private fun generateAndSaveSalt(p: android.content.SharedPreferences): ByteArray { val s = ByteArray(16).apply { SecureRandom().nextBytes(this) }; val enc = E2EManager.encryptWithHardwareKey(Base64.getEncoder().encodeToString(s)).getOrNull() ?: ""; p.edit { putString("install_salt_enc", enc) }; return s }
+    private fun saveThemePreference(d: Boolean) { getSharedPreferences(Constants.PREFS_NAME, MODE_PRIVATE).edit { putBoolean(Constants.KEY_DARK_THEME, d) } }
+    private fun saveAvailabilityPreference(a: Boolean) { getSharedPreferences(Constants.PREFS_NAME, MODE_PRIVATE).edit { putBoolean("is_available", a) } }
+    private fun savePasswordHash(h: String) { getSharedPreferences(Constants.PREFS_NAME, MODE_PRIVATE).edit { putString(Constants.KEY_PASS_HASH, h) } }
+    private fun saveFailedAttempts(a: Int) { getSharedPreferences(Constants.PREFS_NAME, MODE_PRIVATE).edit { putInt(Constants.KEY_FAILED_ATTEMPTS, a) } }
+    private fun saveExpiryDate(d: Long) { getSharedPreferences(Constants.PREFS_NAME, MODE_PRIVATE).edit { putLong(Constants.KEY_EXPIRY, d) } }
+    private fun saveAutoBackupPreference(e: Boolean) { getSharedPreferences(Constants.PREFS_NAME, MODE_PRIVATE).edit { putBoolean(Constants.KEY_AUTO_BACKUP, e) } }
+    private fun saveMyAlias(a: String) { getSharedPreferences(Constants.PREFS_NAME, MODE_PRIVATE).edit { putString(Constants.KEY_MY_ALIAS, a) } }
     private fun performWipe() {
-        // Resolves Audit Point 6: Cryptographic Erasure
         try {
             E2EManager.deleteMasterKey()
         } catch (e: Exception) { }
 
-        // Clear all sensitive preferences
         val prefs = listOf(Constants.PREFS_NAME, "secure_prefs_salt", "pairing_prefs")
         prefs.forEach { name ->
-            getSharedPreferences(name, Context.MODE_PRIVATE).edit().clear().apply()
+            getSharedPreferences(name, MODE_PRIVATE).edit { clear() }
         }
 
         val d = File(filesDir, "tor")
         if (d.exists()) d.deleteRecursively()
 
-        // Final exit
         android.os.Process.killProcess(android.os.Process.myPid())
-        System.exit(0)
+        kotlin.system.exitProcess(0)
     }
     private fun loadOrGenerateIdentityKeys(p: android.content.SharedPreferences) {
         val seedEnc = p.getString(Constants.KEY_IDENTITY_SEED_ENC, null)
