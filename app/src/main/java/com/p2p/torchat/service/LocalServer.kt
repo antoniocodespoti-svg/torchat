@@ -22,6 +22,8 @@ data class RawPacket(
     val sequenceNumber: Int,
     val senderOnion: String,
     val ratchetPubKey: String,
+    val pn: Int,
+    val n: Int,
     val dataB64: String,
     val senderAddress: String // IP/Host of the incoming connection
 )
@@ -37,8 +39,9 @@ class LocalServer(
     companion object {
         private const val TAG = "LocalServer"
         private const val MAGIC_BYTE: Byte = 0x54 // 'T'
-        private const val MAX_PAYLOAD_SIZE = 1 * 1024 * 1024 // Reduced to 1MB to prevent DoS (Audit 12)
+        private const val MAX_PAYLOAD_SIZE = 1 * 1024 * 1024 // 1MB limit
         private const val MAX_ONION_LENGTH = 128
+        private const val MAX_RPK_LENGTH = 1024
         private const val MAX_CONCURRENT_CONNECTIONS = 5
     }
 
@@ -95,6 +98,7 @@ class LocalServer(
                 // 4. Read Sender Onion Length
                 val onionLen = dis.readInt()
                 if (onionLen <= 0 || onionLen > MAX_ONION_LENGTH) {
+                    Log.w(TAG, "Onion length too large: $onionLen")
                     return@launch
                 }
 
@@ -107,26 +111,34 @@ class LocalServer(
                 val senderOnion = String(onionBytes, Charsets.UTF_8)
 
                 if (!senderOnion.matches(Regex(Constants.ONION_V3_REGEX))) {
+                    Log.w(TAG, "Invalid Onion format: $senderOnion")
                     return@launch
                 }
 
-                // 6. Read Ratchet Public Key (Resolves Audit Point 1)
+                // 6. Read Ratchet Public Key Length
                 val pubKeyLen = dis.readInt()
-                if (pubKeyLen <= 0 || pubKeyLen > 1024) { // Ed25519/X25519 are small
+                if (pubKeyLen <= 0 || pubKeyLen > MAX_RPK_LENGTH) {
+                    Log.w(TAG, "Ratchet key length too large: $pubKeyLen")
                     return@launch
                 }
+
+                // 7. Read Ratchet Public Key
                 val pubKeyBytes = ByteArray(pubKeyLen)
                 dis.readFully(pubKeyBytes)
                 val ratchetPubKey = String(pubKeyBytes, Charsets.UTF_8)
 
-                // 7. Read Payload Length
+                // 8. Read PN & N (Double Ratchet Compliance)
+                val pn = dis.readInt()
+                val n = dis.readInt()
+
+                // 9. Read Payload Length
                 val length = dis.readInt()
                 if (length <= 0 || length > MAX_PAYLOAD_SIZE) {
                     Log.w(TAG, "Invalid payload length: $length")
                     return@launch
                 }
 
-                // 8. Read Payload
+                // 10. Read Payload
                 val payloadBytes = ByteArray(length)
                 try {
                     dis.readFully(payloadBytes)
@@ -145,6 +157,8 @@ class LocalServer(
                         sequenceNumber = seq,
                         senderOnion = senderOnion,
                         ratchetPubKey = ratchetPubKey,
+                        pn = pn,
+                        n = n,
                         dataB64 = rawData,
                         senderAddress = socket.inetAddress.hostAddress ?: "unknown"
                     )

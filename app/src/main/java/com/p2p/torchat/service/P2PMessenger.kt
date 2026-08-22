@@ -32,6 +32,8 @@ class P2PMessenger(
         type: Byte,
         sequenceNumber: Int,
         ratchetPubKey: String,
+        pn: Int,
+        n: Int,
         encryptedDataB64: String,
         timeoutMs: Int = 30000,
     ): Result<Boolean> {
@@ -39,6 +41,10 @@ class P2PMessenger(
         if (!cleanOnion.matches(Regex(Constants.ONION_V3_REGEX))) {
             return Result.failure(IllegalArgumentException("Invalid onion address: $cleanOnion"))
         }
+
+        // Limit field lengths to prevent DoS on the receiver
+        if (myOnion.length > 128) return Result.failure(IllegalArgumentException("My Onion too long"))
+        if (ratchetPubKey.length > 1024) return Result.failure(IllegalArgumentException("Ratchet key too long"))
 
         // Add random jitter to obscure traffic patterns
         kotlinx.coroutines.delay(Random.nextLong(100, 500))
@@ -54,6 +60,10 @@ class P2PMessenger(
                 // Add bucketed padding to the base64 data to hide exact length
                 val paddedData = addBucketedPadding(encryptedDataB64)
                 val dataBytes = paddedData.toByteArray(Charsets.UTF_8)
+
+                if (dataBytes.size > 1048576) {
+                    return@withContext Result.failure(IllegalArgumentException("Payload exceeds 1MB limit"))
+                }
 
                 // 1. Write Binary Header
                 dos.writeByte(MAGIC_BYTE.toInt())
@@ -71,7 +81,11 @@ class P2PMessenger(
                 dos.writeInt(rpkBytes.size)
                 dos.write(rpkBytes)
 
-                // 4. Write Payload Length & Data
+                // 4. Write PN & N
+                dos.writeInt(pn)
+                dos.writeInt(n)
+
+                // 5. Write Payload Length & Data
                 dos.writeInt(dataBytes.size)
                 dos.write(dataBytes)
                 dos.flush()

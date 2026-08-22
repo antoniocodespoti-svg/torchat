@@ -19,14 +19,17 @@ class ChatRepository(
     val activeSessions = mutableMapOf<String, DoubleRatchetSession>()
     val messagesMap = mutableMapOf<String, MutableList<Message>>()
     val peersList = mutableListOf<Peer>()
+    private var networkSequence = 0
 
     suspend fun sendMessage(peer: Peer, content: String): Result<Message> {
         val session = activeSessions[peer.onionAddress] ?: return Result.failure(Exception("No active session"))
         val myOnion = (torManager.torState.value as? TorState.Running)?.onionAddress ?: return Result.failure(Exception("Tor not running"))
 
         val sendResult = session.nextSendKey()
-        val ratchetPubKeyStr = E2EManager.publicKeyToString(sendResult.ratchetPublicKey)
-        val aad = E2EManager.buildAAD(1, PayloadType.CHAT_MESSAGE.ordinal.toByte(), sendResult.sequence, myOnion, session.sessionId, ratchetPubKeyStr)
+        val header = sendResult.header
+        val rpkStr = E2EManager.publicKeyToString(header.ratchetPublicKey)
+        val msgSeq = ++networkSequence
+        val aad = E2EManager.buildAAD(1, PayloadType.CHAT_MESSAGE.ordinal.toByte(), msgSeq, myOnion, session.sessionId, rpkStr)
         val encrypted = E2EManager.encryptV2(content, sendResult.messageKey, aad)
 
         val msg = Message(
@@ -37,10 +40,19 @@ class ChatRepository(
             timestamp = System.currentTimeMillis(),
             isOutgoing = true,
             type = PayloadType.CHAT_MESSAGE,
-            sequenceNumber = sendResult.sequence
+            sequenceNumber = msgSeq
         )
 
-        val res = p2pMessenger.sendEncryptedPayload(myOnion, peer.onionAddress, PayloadType.CHAT_MESSAGE.ordinal.toByte(), sendResult.sequence, ratchetPubKeyStr, encrypted)
+        val res = p2pMessenger.sendEncryptedPayload(
+            myOnion = myOnion,
+            recipientOnion = peer.onionAddress,
+            type = PayloadType.CHAT_MESSAGE.ordinal.toByte(),
+            sequenceNumber = msgSeq,
+            ratchetPubKey = rpkStr,
+            pn = header.pn,
+            n = header.n,
+            encryptedDataB64 = encrypted
+        )
 
         return if (res.isSuccess) {
             Result.success(msg.copy(isDelivered = true))

@@ -24,6 +24,8 @@ data class BackupPayload(
     val myAlias: String,
     /** Root entropy for identity recovery */
     val entropy: String,
+    /** Public key to verify restore integrity (Audit 11) */
+    val identityPublicKey: String,
     val accountExpiryDate: Long,
     val peers: List<Peer>,
 )
@@ -38,10 +40,16 @@ class BackupManager(private val context: Context) {
         val prefs = context.getSharedPreferences("tor_chat_prefs", Context.MODE_PRIVATE)
         val entropy = MnemonicManager.mnemonicToEntropy(seed) ?: throw Exception("Invalid seed")
 
+        // Derive PK to include in backup for integrity check
+        val idSeed = com.p2p.torchat.crypto.HKDF.deriveKey(entropy, null, "TorChat/V2/IdentitySeed".toByteArray(), 32)
+        val idKeyPair = E2EManager.ed25519KeyPairFromSeed(idSeed)
+        val idPK = E2EManager.publicKeyToString(idKeyPair.public)
+
         val payload =
             BackupPayload(
                 myAlias = prefs.getString("my_alias", "Amico") ?: "Amico",
                 entropy = Base64.getEncoder().encodeToString(entropy),
+                identityPublicKey = idPK,
                 accountExpiryDate = prefs.getLong("account_expiry_date", 0L),
                 peers = loadPeersFromPrefs(),
             )
@@ -69,6 +77,15 @@ class BackupManager(private val context: Context) {
 
             val jsonPayload = E2EManager.decrypt(portable.encryptedPayload, encryptionKey)
             val data = gson.fromJson(jsonPayload, BackupPayload::class.java)
+
+            // Verification of restore integrity (Audit Point 11)
+            val idSeed = com.p2p.torchat.crypto.HKDF.deriveKey(MnemonicManager.mnemonicToEntropy(seed)!!, null, "TorChat/V2/IdentitySeed".toByteArray(), 32)
+            val idKeyPair = E2EManager.ed25519KeyPairFromSeed(idSeed)
+            val derivedPK = E2EManager.publicKeyToString(idKeyPair.public)
+
+            if (derivedPK != data.identityPublicKey) {
+                return false // Mismatch detected
+            }
 
             context.getSharedPreferences("tor_chat_prefs", Context.MODE_PRIVATE).edit().apply {
                 putString("my_alias", data.myAlias)
