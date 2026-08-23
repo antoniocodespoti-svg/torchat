@@ -47,14 +47,11 @@ class MainActivity : ComponentActivity() {
     }
 
     private lateinit var torManager: TorManager
-    private lateinit var p2pMessenger: P2PMessenger
     private lateinit var notificationHelper: NotificationHelper
     private lateinit var backupManager: BackupManager
     private lateinit var mediaManager: MediaManager
-    private val totpManager = TotpManager()
-    private val timeFetcher = NetworkTimeFetcher()
 
-    private val chatRepository by lazy { ChatRepository(p2pMessenger, torManager) }
+    private val chatRepository by lazy { ChatRepository(P2PMessenger, torManager) }
 
     private var myIdentityKeyPair: KeyPair? = null
     private val handshakeLoading = mutableStateMapOf<String, Boolean>()
@@ -239,8 +236,8 @@ class MainActivity : ComponentActivity() {
 
     private fun handleSubscription(code: String, onion: String) {
         CoroutineScope(Dispatchers.IO).launch {
-            val netTime = timeFetcher.fetchTimeViaTor() ?: System.currentTimeMillis()
-            val matchedDays = totpManager.findMatchingClientDuration(code, onion, netTime)
+            val netTime = NetworkTimeFetcher.fetchTimeViaTor() ?: System.currentTimeMillis()
+            val matchedDays = TotpManager.findMatchingClientDuration(code, onion, netTime)
             if (matchedDays != null) {
                 expiryDate = maxOf(netTime, expiryDate) + (matchedDays.toLong() * 24 * 60 * 60 * 1000)
                 saveExpiryDate(expiryDate)
@@ -453,7 +450,7 @@ class MainActivity : ComponentActivity() {
                     )).toByteArray(Charsets.UTF_8))
 
                     CoroutineScope(Dispatchers.IO).launch {
-                        p2pMessenger.sendEncryptedPayload(myOnion, senderOnion, PayloadType.SESSION_HANDSHAKE.ordinal.toByte(), 0, "", 0, 0, respEnc, timeoutMs = 30000)
+                        P2PMessenger.sendEncryptedPayload(myOnion, senderOnion, PayloadType.SESSION_HANDSHAKE.ordinal.toByte(), 0, "", 0, 0, respEnc, timeoutMs = 30000)
                     }
                 }
 
@@ -498,7 +495,7 @@ class MainActivity : ComponentActivity() {
                     )).toByteArray(Charsets.UTF_8))
 
                     CoroutineScope(Dispatchers.IO).launch {
-                        p2pMessenger.sendEncryptedPayload(myOnion, senderOnion, PayloadType.SESSION_HANDSHAKE.ordinal.toByte(), 0, "", 0, 0, finalEnc, timeoutMs = 30000)
+                        P2PMessenger.sendEncryptedPayload(myOnion, senderOnion, PayloadType.SESSION_HANDSHAKE.ordinal.toByte(), 0, "", 0, 0, finalEnc, timeoutMs = 30000)
                     }
 
                     val sharedSecret = E2EManager.calculateSharedSecret(myEphemeral.private, E2EManager.stringToPublicKey(peerEKStr, Constants.X25519_ALGO))
@@ -545,7 +542,6 @@ class MainActivity : ComponentActivity() {
 
     private fun initializeSystem() {
         torManager = TorManager(this)
-        p2pMessenger = P2PMessenger()
         notificationHelper = NotificationHelper(this)
         backupManager = BackupManager(this)
         mediaManager = MediaManager(this)
@@ -747,7 +743,7 @@ class MainActivity : ComponentActivity() {
 
                 val data = "$eKStr|$myIKStr|$nonceAStr|$aliceInitSig|PFS_INIT"
                 val encryptedJson = Base64.getEncoder().encodeToString(Gson().toJson(NetworkPayload(type = PayloadType.SESSION_HANDSHAKE, senderOnion = myOnion, recipientOnion = p.onionAddress, payloadData = data)).toByteArray(Charsets.UTF_8))
-                p2pMessenger.sendEncryptedPayload(myOnion, p.onionAddress, PayloadType.SESSION_HANDSHAKE.ordinal.toByte(), 0, "", 0, 0, encryptedJson, timeoutMs = 30000)
+                P2PMessenger.sendEncryptedPayload(myOnion, p.onionAddress, PayloadType.SESSION_HANDSHAKE.ordinal.toByte(), 0, "", 0, 0, encryptedJson, timeoutMs = 30000)
             } catch (e: Exception) {
                 // Remove on failure
             } finally {
@@ -756,6 +752,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun broadcastMyStatus(a: Boolean) { val my = (torManager.torState.value as? TorState.Running)?.onionAddress ?: ""; if (my.isEmpty()) return; peersList.forEach { val pay = Base64.getEncoder().encodeToString(Gson().toJson(NetworkPayload(type = PayloadType.PONG, senderOnion = my, recipientOnion = it.onionAddress, payloadData = if (a) "ONLINE" else "OFFLINE")).toByteArray(Charsets.UTF_8)); CoroutineScope(Dispatchers.IO).launch { p2pMessenger.sendEncryptedPayload(my, it.onionAddress, PayloadType.PONG.ordinal.toByte(), 0, "", 0, 0, pay, timeoutMs = 10000) } } }
+    private fun broadcastMyStatus(a: Boolean) { val my = (torManager.torState.value as? TorState.Running)?.onionAddress ?: ""; if (my.isEmpty()) return; peersList.forEach { val pay = Base64.getEncoder().encodeToString(Gson().toJson(NetworkPayload(type = PayloadType.PONG, senderOnion = my, recipientOnion = it.onionAddress, payloadData = if (a) "ONLINE" else "OFFLINE")).toByteArray(Charsets.UTF_8)); CoroutineScope(Dispatchers.IO).launch { P2PMessenger.sendEncryptedPayload(my, it.onionAddress, PayloadType.PONG.ordinal.toByte(), 0, "", 0, 0, pay, timeoutMs = 10000) } } }
     private fun checkAndRequestPermissions() { val p = mutableListOf(Manifest.permission.CAMERA); if (Build.VERSION.SDK_INT >= 33) p.add(Manifest.permission.POST_NOTIFICATIONS); val missing = p.filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }; if (missing.isNotEmpty()) permissionLauncher.launch(missing.toTypedArray()) }
 }

@@ -9,7 +9,7 @@ import java.text.SimpleDateFormat
 import java.util.*
 import javax.net.ssl.HttpsURLConnection
 
-class NetworkTimeFetcher {
+object NetworkTimeFetcher {
     /**
      * Fetches real network time by querying a reliable server via Tor Proxy (SOCKS5).
      * Returns timestamp in milliseconds, or null if failed.

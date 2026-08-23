@@ -76,9 +76,7 @@ sealed class SuperScreen {
 class MainActivity : ComponentActivity() {
     companion object { private const val TAG = "SuperActivity" }
 
-    private val totpManager = TotpManager()
     private val torManager by lazy { TorManager(this) }
-    private val timeFetcher = NetworkTimeFetcher()
     private val gson = Gson()
     private val backupManager by lazy { SuperBackupManager(this) }
     private var currentScreen by mutableStateOf<SuperScreen>(SuperScreen.Auth)
@@ -236,7 +234,7 @@ class MainActivity : ComponentActivity() {
 
     @Composable fun RechargeDialog(onion: String, onD: () -> Unit, onG: (Int, String) -> Unit) {
         var d by remember { mutableIntStateOf(30) }; var code by remember { mutableStateOf<String?>(null) }
-        AlertDialog(onD, { Button({ if (code == null) { CoroutineScope(Dispatchers.IO).launch { val nt = timeFetcher.fetchTimeViaTor() ?: System.currentTimeMillis(); val c = totpManager.generateMasterCode(onion, nt, d); withContext(Dispatchers.Main) { code = c; onG(d, c) } } } else onD() }) { Text(if (code == null) "GENERA" else "CHIUDI") } }, title = { Text("RICARICA") }, text = { if (code == null) { Row(Modifier.fillMaxWidth(), Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) { IconButton({ d -= 30 }) { Icon(Icons.Default.Remove, null) }; Text("$d GG"); IconButton({ d += 30 }) { Icon(Icons.Default.Add, null) } } } else Text(code!!, style = MaterialTheme.typography.displayMedium, color = Color.Yellow) })
+        AlertDialog(onD, { Button({ if (code == null) { CoroutineScope(Dispatchers.IO).launch { val nt = NetworkTimeFetcher.fetchTimeViaTor() ?: System.currentTimeMillis(); val c = TotpManager.generateMasterCode(onion, nt, d); withContext(Dispatchers.Main) { code = c; onG(d, c) } } } else onD() }) { Text(if (code == null) "GENERA" else "CHIUDI") } }, title = { Text("RICARICA") }, text = { if (code == null) { Row(Modifier.fillMaxWidth(), Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) { IconButton({ d -= 30 }) { Icon(Icons.Default.Remove, null) }; Text("$d GG"); IconButton({ d += 30 }) { Icon(Icons.Default.Add, null) } } } else Text(code!!, style = MaterialTheme.typography.displayMedium, color = Color.Yellow) })
     }
 
     @Composable fun SuperSeedScreen() {

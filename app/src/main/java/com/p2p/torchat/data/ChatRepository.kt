@@ -11,7 +11,6 @@ import com.p2p.torchat.service.TorState
 import java.util.UUID
 
 class ChatRepository(
-    private val p2pMessenger: P2PMessenger,
     private val torManager: TorManager,
 ) {
     val activeSessions = mutableMapOf<String, DoubleRatchetSession>()
@@ -46,7 +45,7 @@ class ChatRepository(
                 sequenceNumber = msgSeq
             )
 
-            val res = p2pMessenger.sendEncryptedPayload(
+            val res = P2PMessenger.sendEncryptedPayload(
                 myOnion = myOnion,
                 recipientOnion = peer.onionAddress,
                 type = PayloadType.CHAT_MESSAGE.ordinal.toByte(),

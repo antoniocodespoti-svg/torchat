@@ -14,14 +14,9 @@ import kotlin.time.Duration.Companion.milliseconds
  * Hardened P2PMessenger with Binary Framing (NET-001).
  * Now enforces binary transmission of encrypted payloads.
  */
-class P2PMessenger(
-    private val socksProxyHost: String = "127.0.0.1",
-    private val socksProxyPort: Int = Constants.TOR_SOCKS_PORT,
-) {
-    companion object {
-        private const val MAGIC_BYTE: Byte = 0x54 // 'T'
-        private const val PROTOCOL_VERSION: Byte = 0x01
-    }
+object P2PMessenger {
+    private const val MAGIC_BYTE: Byte = 0x54 // 'T'
+    private const val PROTOCOL_VERSION: Byte = 0x01
 
     /**
      * Sends an already encrypted payload over Tor.
@@ -36,6 +31,8 @@ class P2PMessenger(
         n: Int,
         encryptedDataB64: String,
         timeoutMs: Int = 30000,
+        socksProxyHost: String = "127.0.0.1",
+        socksProxyPort: Int = Constants.TOR_SOCKS_PORT,
     ): Result<Boolean> {
         val cleanOnion = sanitizeOnion(recipientOnion)
         if (!cleanOnion.matches(Regex(Constants.ONION_V3_REGEX))) {

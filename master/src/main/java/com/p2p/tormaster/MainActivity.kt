@@ -117,9 +117,7 @@ class MainActivity : ComponentActivity() {
         private const val TAG = "MasterActivity"
     }
 
-    private val totpManager = TotpManager()
     private val torManager by lazy { TorManager(this) }
-    private val timeFetcher = NetworkTimeFetcher()
     private lateinit var walletManager: MasterWalletManager
     private var currentScreen by mutableStateOf<MasterScreen>(MasterScreen.Auth)
     private var scannedUtenteId by mutableStateOf("")
@@ -387,8 +385,8 @@ class MainActivity : ComponentActivity() {
             Button({
                 CoroutineScope(Dispatchers.IO).launch {
                     if (walletManager.spendDays(d)) {
-                        val nt = timeFetcher.fetchTimeViaTor() ?: System.currentTimeMillis()
-                        code = totpManager.generateClientCode(uid, nt, d)
+                        val nt = NetworkTimeFetcher.fetchTimeViaTor() ?: System.currentTimeMillis()
+                        code = TotpManager.generateClientCode(uid, nt, d)
                     }
                 }
             }, Modifier.fillMaxWidth()) { Text("GENERA") }
@@ -404,8 +402,8 @@ class MainActivity : ComponentActivity() {
             OutlinedTextField(c, { c = it }, label = { Text("Codice Super (8 cifre)") })
             Button({
                 CoroutineScope(Dispatchers.IO).launch {
-                    val nt = timeFetcher.fetchTimeViaTor() ?: System.currentTimeMillis()
-                    val d = totpManager.findMatchingMasterDuration(c, myO, nt)
+                    val nt = NetworkTimeFetcher.fetchTimeViaTor() ?: System.currentTimeMillis()
+                    val d = TotpManager.findMatchingMasterDuration(c, myO, nt)
                     if (d != null) {
                         walletManager.addDays(d)
                         withContext(Dispatchers.Main) { currentScreen = MasterScreen.Wallet }

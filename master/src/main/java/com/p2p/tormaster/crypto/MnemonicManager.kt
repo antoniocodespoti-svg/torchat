@@ -214,43 +214,59 @@ object MnemonicManager {
         )
 
     fun generateMnemonic(): List<String> {
-        val entropy = ByteArray(ENTROPY_BYTE_SIZE)
-        SecureRandom().nextBytes(entropy)
+        val entropy = ByteArray(16); SecureRandom().nextBytes(entropy)
         val hash = MessageDigest.getInstance(Constants.SHA256_ALGO).digest(entropy)
-        val bits = bytesToBits(entropy) + byteToBits(hash[0]).substring(0, Constants.BIP39_CHECKSUM_BITS)
+        val allBits = BooleanArray(128 + 4)
+        for (i in 0 until 16) {
+            val b = entropy[i].toInt() and 0xFF
+            for (j in 0 until 8) allBits[i * 8 + j] = (b shr (7 - j)) and 1 == 1
+        }
+        val checksumByte = hash[0].toInt() and 0xFF
+        for (i in 0 until 4) allBits[128 + i] = (checksumByte shr (7 - i)) and 1 == 1
         val mnemonic = mutableListOf<String>()
-        for (i in 0 until Constants.BIP39_WORD_COUNT) {
-            mnemonic.add(wordList[bits.substring(i * BITS_PER_WORD, (i + 1) * BITS_PER_WORD).toInt(2)])
+        for (i in 0 until 12) {
+            var index = 0
+            for (j in 0 until 11) if (allBits[i * 11 + j]) index = index or (1 shl (10 - j))
+            mnemonic.add(wordList[index])
         }
         return mnemonic
     }
 
     fun isValidMnemonic(mnemonic: List<String>): Boolean {
-        if (mnemonic.size != Constants.BIP39_WORD_COUNT) return false
+        if (mnemonic.size != 12) return false
         return try {
-            val bitString = StringBuilder()
-            for (word in mnemonic) {
-                val index = wordList.indexOf(word)
-                if (index == -1) return false
-                bitString.append(index.toString(2).padStart(BITS_PER_WORD, '0'))
+            val allBits = BooleanArray(12 * 11)
+            for (i in 0 until 12) {
+                val index = wordList.indexOf(mnemonic[i]); if (index == -1) return false
+                for (j in 0 until 11) allBits[i * 11 + j] = (index shr (10 - j)) and 1 == 1
             }
-            val entropy = bitsToBytes(bitString.substring(0, Constants.BIP39_ENTROPY_BITS))
+            val entropy = ByteArray(16)
+            for (i in 0 until 16) {
+                var b = 0
+                for (j in 0 until 8) if (allBits[i * 8 + j]) b = b or (1 shl (7 - j))
+                entropy[i] = b.toByte()
+            }
             val hash = MessageDigest.getInstance(Constants.SHA256_ALGO).digest(entropy)
-            bitString.substring(Constants.BIP39_ENTROPY_BITS) == byteToBits(hash[0]).substring(0, Constants.BIP39_CHECKSUM_BITS)
-        } catch (e: Exception) {
-            Log.e(TAG, "Mnemonic validation failed", e)
-            false
-        }
+            val checksumByte = hash[0].toInt() and 0xFF
+            for (i in 0 until 4) if (allBits[128 + i] != ((checksumByte shr (7 - i)) and 1 == 1)) return false
+            true
+        } catch (e: Exception) { false }
     }
 
     fun mnemonicToEntropy(mnemonic: List<String>): ByteArray? {
         if (!isValidMnemonic(mnemonic)) return null
-        val bitString = StringBuilder()
-        for (word in mnemonic) {
-            val index = wordList.indexOf(word)
-            bitString.append(index.toString(2).padStart(BITS_PER_WORD, '0'))
+        val allBits = BooleanArray(12 * 11)
+        for (i in 0 until 12) {
+            val index = wordList.indexOf(mnemonic[i])
+            for (j in 0 until 11) allBits[i * 11 + j] = (index shr (10 - j)) and 1 == 1
         }
-        return bitsToBytes(bitString.substring(0, Constants.BIP39_ENTROPY_BITS))
+        val entropy = ByteArray(16)
+        for (i in 0 until 16) {
+            var b = 0
+            for (j in 0 until 8) if (allBits[i * 8 + j]) b = b or (1 shl (7 - j))
+            entropy[i] = b.toByte()
+        }
+        return entropy
     }
 
     fun deriveKeyFromMnemonic(
@@ -261,13 +277,4 @@ object MnemonicManager {
         return SecretKeySpec(HKDF.deriveKey(entropy, salt, "MnemonicBackup".toByteArray(), Constants.AES_KEY_BYTES), "AES")
     }
 
-    private fun bytesToBits(bytes: ByteArray): String = bytes.joinToString("") { it.toUByte().toString(2).padStart(8, '0') }
-
-    private fun byteToBits(byte: Byte): String = byte.toUByte().toString(2).padStart(8, '0')
-
-    private fun bitsToBytes(bits: String): ByteArray {
-        val bytes = ByteArray(bits.length / 8)
-        for (i in bytes.indices) bytes[i] = bits.substring(i * 8, (i + 1) * 8).toInt(2).toByte()
-        return bytes
-    }
 }
