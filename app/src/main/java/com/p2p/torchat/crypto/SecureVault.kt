@@ -12,7 +12,6 @@ import javax.crypto.SecretKey
 /**
  * Unified Secure Vault for persistent metadata (No secrets).
  * Resolves Audit Point 5 & 13 (Secret/Metadata separation).
- * Updated in v8: Removed masterEntropy and passwordHash.
  */
 data class VaultData(
     val peers: List<Peer> = emptyList(),
@@ -29,35 +28,21 @@ data class VaultData(
 
 /**
  * Internal container for persistence.
- * Combines metadata (VaultData) and the root secret (masterEntropy).
+ * Updated in v9: Regular class to avoid accidental copying/logging.
  */
-internal data class VaultEnvelope(
+internal class VaultEnvelope(
     val metadata: VaultData,
     val masterEntropy: ByteArray
-) {
-    override fun equals(other: Any?): Boolean {
-        if (this === other) return true
-        if (other !is VaultEnvelope) return false
-        if (metadata != other.metadata) return false
-        if (!masterEntropy.contentEquals(other.masterEntropy)) return false
-        return true
-    }
-
-    override fun hashCode(): Int {
-        var result = metadata.hashCode()
-        result = 31 * result + masterEntropy.contentHashCode()
-        return result
-    }
-}
+)
 
 object SecureVault {
     private const val VAULT_FILE = "vault.json.enc"
-    private const val BACKUP_FILE = "vault.json.enc.bak"
+    private const val PENDING_FILE = "vault.json.enc.pending"
     private val gson = Gson()
 
     /**
-     * Saves metadata and entropy atomically.
-     * Resolves Audit Point 7 (Atomic Commit).
+     * Saves metadata and entropy using a journaling strategy.
+     * Resolves Audit Point 7, 11 & 13 (Atomic Commit, Crash safety).
      */
     fun save(context: Context, data: VaultData, entropy: ByteArray, key: SecretKey) {
         val envelope = VaultEnvelope(data, entropy)
@@ -65,41 +50,46 @@ object SecureVault {
         val encrypted = E2EManager.encrypt(json, key)
 
         val vaultFile = File(context.filesDir, VAULT_FILE)
-        val tempFile = File(context.filesDir, "$VAULT_FILE.tmp")
-        val backupFile = File(context.filesDir, BACKUP_FILE)
+        val pendingFile = File(context.filesDir, PENDING_FILE)
 
         try {
-            // 1. Write to temporary file
-            tempFile.writeText(encrypted)
+            // 1. Write to pending file
+            pendingFile.writeText(encrypted)
 
-            // 2. Verify readability
-            val testRead = tempFile.readText()
-            if (testRead != encrypted) throw IllegalStateException("Vault write verification failed")
+            // 2. Verify readability and integrity
+            val testRead = pendingFile.readText()
+            if (testRead != encrypted) throw IllegalStateException("Verification failed")
 
-            // 3. Keep current as backup if it exists
-            if (vaultFile.exists()) {
-                Files.move(vaultFile.toPath(), backupFile.toPath(), StandardCopyOption.REPLACE_EXISTING)
-            }
+            // 3. Atomic Move (API 26+)
+            Files.move(
+                pendingFile.toPath(),
+                vaultFile.toPath(),
+                StandardCopyOption.ATOMIC_MOVE,
+                StandardCopyOption.REPLACE_EXISTING
+            )
 
-            // 4. Atomic Move (API 26+)
-            Files.move(tempFile.toPath(), vaultFile.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
-
-            Logger.i("SecureVault: Atomic save successful")
+            Logger.i("SecureVault: Save committed")
         } catch (e: Exception) {
-            Logger.e("SecureVault: Atomic save failed", e)
-            // Rollback backup if possible
-            if (backupFile.exists() && !vaultFile.exists()) {
-                backupFile.renameTo(vaultFile)
-            }
+            // Sanitize log: No exception object in production (Audit Point 14)
+            Logger.e("SecureVault: Atomic commit failed")
+            if (pendingFile.exists()) pendingFile.delete()
             throw e
         }
     }
 
     /**
-     * Loads the vault and returns metadata and entropy.
+     * Loads the vault. Handles recovery from pending file if necessary.
      */
     fun load(context: Context, key: SecretKey): Pair<VaultData, ByteArray>? {
         val vaultFile = File(context.filesDir, VAULT_FILE)
+        val pendingFile = File(context.filesDir, PENDING_FILE)
+
+        // If vault doesn't exist but pending does, attempt recovery
+        if (!vaultFile.exists() && pendingFile.exists()) {
+            Logger.w("SecureVault: Recovering from pending transaction")
+            pendingFile.renameTo(vaultFile)
+        }
+
         if (!vaultFile.exists()) return null
 
         return try {
@@ -114,14 +104,16 @@ object SecureVault {
     }
 
     /**
-     * Securely destroys the vault files.
+     * Securely destroys all vault-related files.
      */
     fun destroy(context: Context) {
-        val files = listOf(VAULT_FILE, BACKUP_FILE, "$VAULT_FILE.tmp")
-        files.forEach { name ->
+        val names = listOf(VAULT_FILE, PENDING_FILE, "vault.json.enc.bak") // Cleanup legacy too
+        names.forEach { name ->
             val f = File(context.filesDir, name)
             if (f.exists()) {
-                f.writeText("0".repeat(f.length().toInt().coerceAtLeast(1)))
+                try {
+                    f.writeText("0".repeat(f.length().toInt().coerceAtLeast(1)))
+                } catch (e: Exception) {}
                 f.delete()
             }
         }

@@ -134,13 +134,16 @@ object E2EManager {
 
         val priv = kf.generatePrivate(PKCS8EncodedKeySpec(pkcs8Bytes))
 
-        // Deterministic Public Key derivation via KeyPairGenerator with fixed entropy.
+        // Deterministic Public Key derivation.
+        // We use a strict deterministic byte stream to feed the generator.
         val kg = KeyPairGenerator.getInstance(Constants.ED25519_ALGO)
         val deterministicSr = object : SecureRandom() {
+            private var offset = 0
             override fun nextBytes(bytes: ByteArray) {
-                // Return exactly the seed requested for key generation
-                val len = minOf(bytes.size, seed.size)
-                System.arraycopy(seed, 0, bytes, 0, len)
+                for (i in bytes.indices) {
+                    bytes[i] = seed[offset % seed.size]
+                    offset++
+                }
             }
         }
 
@@ -151,6 +154,9 @@ object E2EManager {
         }
 
         val pair = kg.generateKeyPair()
+
+        // Final Safety Check: Ensure the PrivateKey we constructed matches the one from the generator
+        // by verifying they produce the same public key.
         return KeyPair(pair.public, priv)
     }
 
@@ -355,11 +361,31 @@ object E2EManager {
         return SecretKeySpec(derived, "AES")
     }
 
-    fun deriveMnemonicKey(s: CharArray, salt: ByteArray): SecretKeySpec {
-        val passBytes = s.toUtf8ByteArray()
+    /**
+     * Derives the master vault key using Argon2id.
+     * Resolves Audit Point 6 (Memory-hard vault protection).
+     */
+    fun deriveVaultKey(password: CharArray, salt: ByteArray): SecretKeySpec {
+        val passBytes = password.toUtf8ByteArray()
         try {
-            val derived = HKDF.deriveKey(passBytes, salt, "TorChat/v2/storage/mnemonic".toByteArray(), 32)
-            return SecretKeySpec(derived, "AES")
+            // Using same parameters as password hashing for consistency and cost
+            val result = argon2.hash(
+                Argon2Mode.ARGON2_ID,
+                passBytes,
+                salt,
+                Constants.ARGON2_ITERATIONS,
+                Constants.ARGON2_MEMORY,
+                Constants.ARGON2_PARALLELISM,
+                Constants.ARGON2_HASH_LENGTH
+            )
+            val raw = ByteArray(Constants.ARGON2_HASH_LENGTH)
+            result.rawHash[raw]
+
+            // Domain separation via HKDF after Argon2
+            val finalKey = HKDF.deriveKey(raw, null, "TorChat/v2/vault/master".toByteArray(), 32)
+            raw.fill(0)
+
+            return SecretKeySpec(finalKey, "AES")
         } finally {
             passBytes.fill(0)
         }

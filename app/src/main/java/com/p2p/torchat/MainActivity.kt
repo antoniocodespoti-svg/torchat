@@ -197,7 +197,6 @@ class MainActivity : ComponentActivity() {
                 if (!isVaultCreated) {
                     val entropy = tempEntropy ?: ByteArray(16).apply { SecureRandom().nextBytes(this) }
                     PrivacyController.setup(password, entropy)
-                    tempEntropy = null
                 } else {
                     PrivacyController.unlock(password)
                 }
@@ -226,6 +225,8 @@ class MainActivity : ComponentActivity() {
                 }
             } finally {
                 password.fill('\u0000')
+                tempEntropy?.fill(0)
+                tempEntropy = null
             }
         }
         return false
@@ -240,6 +241,8 @@ class MainActivity : ComponentActivity() {
                 currentScreenState = Screen.Auth
                 Toast.makeText(this, "Identità ripristinata. Imposta una nuova password.", Toast.LENGTH_LONG).show()
             } catch (e: Exception) {
+                tempEntropy?.fill(0)
+                tempEntropy = null
                 Toast.makeText(this, "Errore Ripristino", Toast.LENGTH_SHORT).show()
             }
         } else {

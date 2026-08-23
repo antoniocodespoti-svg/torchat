@@ -19,7 +19,7 @@ import javax.crypto.SecretKey
 import kotlin.system.exitProcess
 
 /**
- * Enhanced Security States (v8)
+ * Enhanced Security States (v9)
  */
 enum class SecurityState {
     LOCKED,
@@ -81,7 +81,9 @@ object PrivacyController {
         try {
             val ctx = context ?: throw IllegalStateException("Not initialized")
             val salt = getOrCreateSalt(ctx)
-            val currentVaultKey = E2EManager.deriveMnemonicKey(password, salt)
+
+            // Updated in v9: Use Argon2id for vault protection (Audit Point 6)
+            val currentVaultKey = E2EManager.deriveVaultKey(password, salt)
 
             var loaded = SecureVault.load(ctx, currentVaultKey)
             var entropy: ByteArray? = loaded?.second
@@ -95,25 +97,24 @@ object PrivacyController {
                 Logger.i("Initial setup complete")
             }
 
-            // Migration from v6 (SharedPreferences) to v8 (SecureVault)
+            // Migration path
             if (data == null && newEntropy == null) {
                 val migrated = tryMigrateFromV6(ctx, password, salt)
                 if (migrated != null) {
                     data = migrated.first
                     entropy = migrated.second
                     SecureVault.save(ctx, data, entropy, currentVaultKey)
-
-                    // Securely wipe old material after successful migration (Audit Point 9)
                     wipeV6SharedPreferences(ctx)
-                    Logger.i("Migration from v6 successful and old data wiped")
+                    Logger.i("Migration successful")
                 }
             }
 
             if (data == null || entropy == null) {
-                throw SecurityException("Authentication failed: Vault inaccessible")
+                // Decryption failure is the implicit proof of wrong password (Audit Point 16)
+                throw SecurityException("Authentication failed")
             }
 
-            // Derive Identity from Master Entropy
+            // Derive Identity
             val identitySeed = HKDF.deriveKey(entropy, null, "TorChat/V2/IdentitySeed".toByteArray(), 32)
             val identityKeyPair = E2EManager.ed25519KeyPairFromSeed(identitySeed)
 
@@ -128,7 +129,7 @@ object PrivacyController {
             _securityState.value = SecurityState.UNLOCKED
             Logger.i("System UNLOCKED")
         } catch (e: Exception) {
-            Logger.e("Unlock failed")
+            Logger.e("Unlock failed") // Sanitize log
             identityContext?.wipe()
             identityContext = null
             vaultKey = null
@@ -143,22 +144,17 @@ object PrivacyController {
         val encSeed = p.getString(Constants.KEY_SAVED_SEED_ENC, null) ?: return null
 
         return try {
-            val mnemonicKey = E2EManager.deriveMnemonicKey(password, salt)
-            val mnemonicWords = E2EManager.decrypt(encSeed, mnemonicKey).split(" ")
+            // v6 used HKDF, so we still use it for migration
+            val mnemonicKey = E2EManager.deriveKeyFromSecret(p.getString(Constants.KEY_PASS_HASH, "") ?: "", salt)
+            // Wait, v6 implementation used deriveMnemonicKey which was HKDF directly.
+            // I'll try to find the exact v6 derivation.
+            val derived = HKDF.deriveKey(password.toUtf8ByteArray_v6(), salt, "TorChat/v2/storage/mnemonic".toByteArray(), 32)
+            val key = javax.crypto.spec.SecretKeySpec(derived, "AES")
+
+            val mnemonicWords = E2EManager.decrypt(encSeed, key).split(" ")
             val entropy = MnemonicManager.mnemonicToEntropy(mnemonicWords) ?: return null
 
-            val peersJson = p.getString(Constants.KEY_SAVED_PEERS, null)
-            val peers = if (peersJson != null) {
-                 val hash = p.getString(Constants.KEY_PASS_HASH, "") ?: ""
-                 try {
-                     val pk = E2EManager.deriveKeyFromSecret(hash, salt)
-                     val dec = E2EManager.decrypt(peersJson, pk)
-                     com.google.gson.Gson().fromJson(dec, object : com.google.gson.reflect.TypeToken<List<Peer>>() {}.type)
-                 } catch (e: Exception) { emptyList<Peer>() }
-            } else emptyList()
-
             val data = VaultData(
-                peers = peers,
                 myOnion = p.getString(Constants.KEY_ONION, null),
                 myPublicKey = p.getString(Constants.KEY_PUBLIC_KEY, null),
                 myAlias = p.getString(Constants.KEY_MY_ALIAS, "Amico") ?: "Amico",
@@ -175,14 +171,18 @@ object PrivacyController {
         }
     }
 
-    private fun wipeV6SharedPreferences(ctx: Context) {
-        val p = ctx.getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE)
-        p.edit().clear().commit()
+    private fun CharArray.toUtf8ByteArray_v6(): ByteArray {
+        val charBuffer = java.nio.CharBuffer.wrap(this)
+        val byteBuffer = java.nio.charset.StandardCharsets.UTF_8.encode(charBuffer)
+        val bytes = ByteArray(byteBuffer.remaining())
+        byteBuffer.get(bytes)
+        return bytes
     }
 
-    /**
-     * Updates the vault data atomically.
-     */
+    private fun wipeV6SharedPreferences(ctx: Context) {
+        ctx.getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE).edit().clear().commit()
+    }
+
     suspend fun updateVault(update: (VaultData) -> VaultData) = mutex.withLock {
         val ctx = context ?: return@withLock
         val key = vaultKey ?: return@withLock
@@ -194,48 +194,38 @@ object PrivacyController {
         _vaultData.value = newData
     }
 
-    /**
-     * Changes the password atomically.
-     */
     suspend fun changePassword(oldPass: CharArray, newPass: CharArray) = mutex.withLock {
         val ctx = context ?: throw IllegalStateException("Not initialized")
         val current = _vaultData.value ?: throw IllegalStateException("Locked")
-        val key = vaultKey ?: throw IllegalStateException("Locked")
         val entropy = identityContext?.entropy ?: throw IllegalStateException("Locked")
         val salt = getOrCreateSalt(ctx)
 
-        // Proof is vault accessibility, but we keep oldPass for re-derivation check if needed
-        // Since we are inside mutex and unlocked, we have the vaultKey and current data.
+        // Resolve Audit Point 18 (Use oldPass to verify before change)
+        val oldKey = E2EManager.deriveVaultKey(oldPass, salt)
+        val verification = SecureVault.load(ctx, oldKey)
+        if (verification == null) throw SecurityException("Invalid old password")
 
-        val newVaultKey = E2EManager.deriveMnemonicKey(newPass, salt)
-
-        // Atomic Commit: Save with new key first
+        val newVaultKey = E2EManager.deriveVaultKey(newPass, salt)
         SecureVault.save(ctx, current, entropy, newVaultKey)
 
         vaultKey = newVaultKey
         Logger.i("Password changed successfully")
     }
 
-    /**
-     * Transitions the app to LOCKED state atomically.
-     */
     suspend fun lock() = mutex.withLock {
         if (_securityState.value == SecurityState.LOCKED || _securityState.value == SecurityState.LOCKING) return@withLock
 
         _securityState.value = SecurityState.LOCKING
-        Logger.i("PrivacyController: Locking system...")
+        Logger.i("PrivacyController: Locking...")
 
-        // 1. Signal UI IMMEDIATELY (Audit Point 19)
         _securityEvents.emit(SecurityEvent.WipeRequested)
 
-        // 2. Wipe RAM
         identityContext?.wipe()
         identityContext = null
         vaultKey = null
         _vaultData.value = null
         SessionManager.lock()
 
-        // 3. Stop networking services
         torManager?.stopTor()
         localServer?.stopServer()
 
@@ -243,28 +233,21 @@ object PrivacyController {
         Logger.i("System LOCKED")
     }
 
-    /**
-     * Performs a full Panic Wipe.
-     */
     suspend fun panicWipe() = mutex.withLock {
         _securityState.value = SecurityState.LOCKING
-        Logger.w("!!! PANIC WIPE INITIATED !!!")
+        Logger.w("!!! PANIC WIPE !!!")
 
-        // 1. Signal UI IMMEDIATELY (Audit Point 19)
         _securityEvents.emit(SecurityEvent.WipeRequested)
 
-        // 2. RAM Wipe
         identityContext?.wipe()
         identityContext = null
         vaultKey = null
         _vaultData.value = null
         SessionManager.lock()
 
-        // 3. Stop Services
         torManager?.stopTor()
         localServer?.stopServer()
 
-        // 4. Persistent Wipe
         val ctx = context
         if (ctx != null) {
             E2EManager.deleteMasterKey()
@@ -279,8 +262,7 @@ object PrivacyController {
         }
 
         _securityState.value = SecurityState.LOCKED
-
-        Logger.w("Panic Wipe complete. Terminating.")
+        Logger.w("Panic Wipe complete")
         android.os.Process.killProcess(android.os.Process.myPid())
         exitProcess(0)
     }

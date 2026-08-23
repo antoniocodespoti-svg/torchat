@@ -15,36 +15,32 @@ import javax.crypto.spec.SecretKeySpec
 class SecureVaultTest {
 
     @Test
-    fun testVaultAtomicSave() {
+    fun testVaultJournalingRecovery() {
         val context = mock(Context::class.java)
-        val tempDir = Files.createTempDirectory("vault_test").toFile()
+        val tempDir = Files.createTempDirectory("vault_journal_test").toFile()
         `when`(context.filesDir).thenReturn(tempDir)
 
-        val data = VaultData(myAlias = "TestUser")
+        val data = VaultData(myAlias = "JournalUser")
         val entropy = ByteArray(16) { 1 }
         val key = SecretKeySpec(ByteArray(32) { 2 }, "AES")
 
-        // 1. Initial Save
-        SecureVault.save(context, data, entropy, key)
+        // 1. Manually create a PENDING file without a VAULT file (simulating crash during move)
+        val envelope = com.p2p.torchat.crypto.VaultEnvelope(data, entropy)
+        val json = com.google.gson.Gson().toJson(envelope)
+        val encrypted = com.p2p.torchat.crypto.E2EManager.encrypt(json, key)
+
+        val pendingFile = File(tempDir, "vault.json.enc.pending")
+        pendingFile.writeText(encrypted)
 
         val vaultFile = File(tempDir, "vault.json.enc")
-        assertTrue(vaultFile.exists())
+        assertTrue(!vaultFile.exists())
 
-        // 2. Load and verify
+        // 2. Load should recover from pending
         val loaded = SecureVault.load(context, key)
         assertNotNull(loaded)
-        assertTrue(loaded!!.first.myAlias == "TestUser")
-        assertTrue(loaded.second.contentEquals(entropy))
-
-        // 3. Verify Backup exists after second save
-        val updatedData = data.copy(myAlias = "UpdatedUser")
-        SecureVault.save(context, updatedData, entropy, key)
-
-        val backupFile = File(tempDir, "vault.json.enc.bak")
-        assertTrue(backupFile.exists())
-
-        val loadedUpdated = SecureVault.load(context, key)
-        assertTrue(loadedUpdated!!.first.myAlias == "UpdatedUser")
+        assertTrue(loaded!!.first.myAlias == "JournalUser")
+        assertTrue(vaultFile.exists())
+        assertTrue(!pendingFile.exists())
 
         tempDir.deleteRecursively()
     }
