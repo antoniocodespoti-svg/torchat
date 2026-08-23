@@ -54,29 +54,12 @@ class MainActivity : ComponentActivity() {
 
     private val chatRepository by lazy { ChatRepository(P2PMessenger, torManager) }
 
-    private var myIdentityKeyPair: KeyPair? = null
-    private val handshakeLoading = mutableStateMapOf<String, Boolean>()
-
-    private val handshakeManager = HandshakeManager()
-
-    private val peersList = mutableStateListOf<Peer>()
-    private val messagesMap = mutableStateMapOf<String, MutableList<Message>>()
-    private val unreadCounts = mutableStateMapOf<String, Int>()
-    private val networkSequence = AtomicInteger(0)
-
-    private var currentScreenState by mutableStateOf<Screen>(Screen.Auth)
-    private var isAuthenticated by mutableStateOf(false)
-    private var isTermsAccepted by mutableStateOf(false)
-    private var savedPasswordHash by mutableStateOf<String?>(null)
-    private var sessionPassword by mutableStateOf<CharArray?>(null)
-    private var failedAttempts by mutableIntStateOf(0)
-    private var currentSeed: ByteArray? = null // P0: Raw 16-byte entropy (Security Boundary v5)
-
     private var myAlias by mutableStateOf("Amico")
     private var isDarkTheme by mutableStateOf(true)
     private var isAutoBackupEnabled by mutableStateOf(false)
     private var isAvailable by mutableStateOf(false)
     private var expiryDate by mutableLongStateOf(0L)
+    private var tempEntropy: ByteArray? = null
 
     private var peerToConfirmWithKey by mutableStateOf<Triple<String, String, String>?>(null)
     private var activeChatPeer: Peer? = null
@@ -98,7 +81,7 @@ class MainActivity : ComponentActivity() {
         window.setFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE, android.view.WindowManager.LayoutParams.FLAG_SECURE)
         loadPreferences()
 
-        // Observe Security Events (Security Boundary v5)
+        // Observe Security Events (Security Boundary v6)
         lifecycleScope.launch {
             PrivacyController.securityEvents.collect { event ->
                 when (event) {
@@ -109,12 +92,6 @@ class MainActivity : ComponentActivity() {
                             unreadCounts.clear()
                             activeChatMessages = null
                             activeChatPeer = null
-
-                            myIdentityKeyPair = null
-                            sessionPassword?.fill('\u0000')
-                            sessionPassword = null
-                            currentSeed?.fill(0)
-                            currentSeed = null
 
                             isAuthenticated = false
                             currentScreenState = Screen.Auth
@@ -137,9 +114,9 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun AppMainContent() {
         val securityState by PrivacyController.securityState.collectAsState()
+        val identity = PrivacyController.getIdentityContext()
 
         if (securityState == SecurityState.LOCKED && isAuthenticated) {
-            // Force return to Auth screen if locked but was authenticated
             isAuthenticated = false
             currentScreenState = Screen.Auth
         }
@@ -153,16 +130,42 @@ class MainActivity : ComponentActivity() {
 
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             when (val screen = currentScreenState) {
-                is Screen.Auth -> AuthScreen(if (savedPasswordHash == null) AuthMode.CREATE else AuthMode.LOGIN, Constants.MAX_AUTH_ATTEMPTS - failedAttempts, { handleAuthResult(it.toCharArray()) })
+                is Screen.Auth -> AuthScreen(
+                    if (savedPasswordHash == null) AuthMode.CREATE else AuthMode.LOGIN,
+                    Constants.MAX_AUTH_ATTEMPTS - failedAttempts,
+                    { handleAuthResult(it.toCharArray()) }
+                )
                 is Screen.Subscription -> SubscriptionScreen(myOnion) { handleSubscription(it, myOnion) }
-                is Screen.Home -> HomeScreen(torState, myOnion, myAlias, myIdentityKeyPair?.let { E2EManager.publicKeyToString(it.public) } ?: "", isDarkTheme, isAvailable, expiryDate, peersList, unreadCounts, peerToConfirmWithKey, { isDarkTheme = !isDarkTheme; saveThemePreference(isDarkTheme) }, { isAvailable = !isAvailable; saveAvailabilityPreference(isAvailable); broadcastMyStatus(isAvailable) }, { myAlias = it; saveMyAlias(it) }, { a, o, k -> handleAddPeer(a, o, k) }, { handleSelectPeer(it) }, { currentScreenState = Screen.QRCode }, { currentScreenState = Screen.QRScanner }, { currentScreenState = Screen.Settings }, { torManager.setTorRunning(it) }, { peersList.remove(it); savePeers() }, { peerToConfirmWithKey = null })
+                is Screen.Home -> HomeScreen(
+                    torState,
+                    myOnion,
+                    myAlias,
+                    identity?.identityKeyPair?.let { E2EManager.publicKeyToString(it.public) } ?: "",
+                    isDarkTheme,
+                    isAvailable,
+                    expiryDate,
+                    peersList,
+                    unreadCounts,
+                    peerToConfirmWithKey,
+                    { isDarkTheme = !isDarkTheme; saveThemePreference(isDarkTheme) },
+                    { isAvailable = !isAvailable; saveAvailabilityPreference(isAvailable); broadcastMyStatus(isAvailable) },
+                    { myAlias = it; saveMyAlias(it) },
+                    { a, o, k -> handleAddPeer(a, o, k) },
+                    { handleSelectPeer(it) },
+                    { currentScreenState = Screen.QRCode },
+                    { currentScreenState = Screen.QRScanner },
+                    { currentScreenState = Screen.Settings },
+                    { torManager.setTorRunning(it) },
+                    { peersList.remove(it); savePeers() },
+                    { peerToConfirmWithKey = null }
+                )
                 is Screen.Chat -> {
                     val ms = messagesMap.getOrPut(screen.peer.onionAddress) { mutableStateListOf() }
                     LaunchedEffect(screen.peer.onionAddress) { if (!SessionManager.hasSession(screen.peer.onionAddress)) initiateHandshake(screen.peer) }
                     ChatScreen(screen.peer, ms, handshakeLoading[screen.peer.onionAddress] ?: false, { sendMessage(screen.peer, it, ms) }, { activeChatPeer = screen.peer; activeChatMessages = ms; pickImageLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }, { activeChatPeer = screen.peer; activeChatMessages = ms; pickFileLauncher.launch("*/*") }, { f, b -> saveAttachmentToExternalStorage(f, b) }, { handleDeleteSession(screen.peer, ms) }, { currentScreenState = Screen.Verification(screen.peer) }, { currentScreenState = Screen.Home })
                 }
                 is Screen.Settings -> SettingsScreen({ handleExportInternal() }, { importBackupLauncher.launch(arrayOf("application/json")) }, isAutoBackupEnabled, { isAutoBackupEnabled = it; saveAutoBackupPreference(it) }, { currentScreenState = Screen.ChangePassword }, { currentScreenState = Screen.Subscription }, expiryDate, { currentScreenState = Screen.Info }, { currentScreenState = Screen.TermsOfUse }, { currentScreenState = Screen.Home })
-                is Screen.QRCode -> QRCodeScreen(myOnion, myAlias, myIdentityKeyPair?.let { E2EManager.publicKeyToString(it.public) } ?: "") { currentScreenState = Screen.Home }
+                is Screen.QRCode -> QRCodeScreen(myOnion, myAlias, identity?.identityKeyPair?.let { E2EManager.publicKeyToString(it.public) } ?: "") { currentScreenState = Screen.Home }
                 is Screen.Verification -> VerificationScreen(screen.peer, { handleVerifyPeer(screen.peer) }, { currentScreenState = Screen.Chat(screen.peer) })
                 is Screen.QRScanner -> ClientQRScannerScreen({ handleQRScan(it) }, { currentScreenState = Screen.Home })
                 is Screen.TermsOfUse -> TermsOfUseScreen(isTermsAccepted, { handleTermsAccept() }, { currentScreenState = Screen.Settings })
@@ -170,23 +173,10 @@ class MainActivity : ComponentActivity() {
                 is Screen.ChangePassword -> AuthScreen(AuthMode.CHANGE, onAuthSuccess = { handleChangePassword(it) }) { currentScreenState = Screen.Settings }
                 is Screen.Recovery -> SeedScreen(SeedMode.INPUT, emptyList(), { handleManualRecovery(it) }, { currentScreenState = Screen.Auth })
                 is Screen.SeedBackup -> {
-                    if (currentSeed == null) {
-                        val p = getSharedPreferences(Constants.PREFS_NAME, MODE_PRIVATE)
-                        val salt = getOrCreateSalt()
-                        val seedEnc = p.getString(Constants.KEY_SAVED_SEED_ENC, null)
-                        val pass = sessionPassword
-                        if (seedEnc != null && pass != null) {
-                            try {
-                                val dec = E2EManager.decrypt(seedEnc, E2EManager.deriveMnemonicKey(pass, salt))
-                                currentSeed = MnemonicManager.mnemonicToEntropy(dec.split(" "))
-                            } catch (e: Exception) {
-                                currentScreenState = Screen.Recovery
-                            }
-                        } else {
-                            currentScreenState = Screen.Recovery
-                        }
+                    val mnemonic = identity?.mnemonicWords ?: emptyList()
+                    if (mnemonic.isEmpty()) {
+                        currentScreenState = Screen.Recovery
                     }
-                    val mnemonic = currentSeed?.let { MnemonicManager.entropyToMnemonic(it) } ?: emptyList()
                     SeedScreen(SeedMode.DISPLAY, mnemonic, { handleExportInternal() }, { currentScreenState = Screen.Home })
                 }
                 is Screen.SeedRestore -> SeedScreen(SeedMode.INPUT, emptyList(), { handleSeedRestore(it) }, { currentScreenState = Screen.Settings })
@@ -195,64 +185,48 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleAuthResult(password: CharArray): Boolean {
-        val p = getSharedPreferences(Constants.PREFS_NAME, MODE_PRIVATE)
+        lifecycleScope.launch {
+            try {
+                if (savedPasswordHash == null) {
+                    val entropy = tempEntropy ?: ByteArray(16).apply { SecureRandom().nextBytes(this) }
+                    PrivacyController.setup(password, entropy)
+                    tempEntropy = null
+                } else {
+                    PrivacyController.unlock(password)
+                }
 
-        if (savedPasswordHash == null) {
-            // Initial Setup or Recovery Completion
-            val h = E2EManager.hashPassword(password)
-            savePasswordHash(h)
-            savedPasswordHash = h
-            sessionPassword = password.copyOf() // P0: RAM only
-
-            val entropy = currentSeed ?: ByteArray(16).apply { SecureRandom().nextBytes(this) }
-            currentSeed = entropy
-            val salt = getOrCreateSalt()
-            val mnemonicWords = MnemonicManager.entropyToMnemonic(entropy)
-            val encMnemonic = E2EManager.encrypt(mnemonicWords.joinToString(" "), E2EManager.deriveMnemonicKey(password, salt))
-
-            p.edit {
-                putString(Constants.KEY_SAVED_SEED_ENC, encMnemonic)
+                withContext(Dispatchers.Main) {
+                    isAuthenticated = true
+                    failedAttempts = 0
+                    saveFailedAttempts(0)
+                    savedPasswordHash = getSharedPreferences(Constants.PREFS_NAME, MODE_PRIVATE).getString(Constants.KEY_PASS_HASH, null)
+                    loadSensitiveData(getSharedPreferences(Constants.PREFS_NAME, MODE_PRIVATE))
+                    currentScreenState = Screen.Home
+                }
+            } catch (e: SecurityException) {
+                withContext(Dispatchers.Main) {
+                    failedAttempts++
+                    saveFailedAttempts(failedAttempts)
+                    if (failedAttempts >= Constants.MAX_AUTH_ATTEMPTS) PrivacyController.panicWipe()
+                    Toast.makeText(this@MainActivity, "Password errata", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    Log.e(TAG, "Unlock error", e)
+                    Toast.makeText(this@MainActivity, "Errore Inizializzazione", Toast.LENGTH_SHORT).show()
+                }
+            } finally {
+                password.fill('\u0000')
             }
-
-            ensureIdentityLinkedToEntropy(entropy)
-            isAuthenticated = true
-            lifecycleScope.launch { PrivacyController.unlock() }
-            failedAttempts = 0
-            saveFailedAttempts(0)
-
-            startServices()
-            loadSensitiveData(p)
-            currentScreenState = Screen.Home
-            return true
         }
-
-        if (E2EManager.verifyPassword(password, savedPasswordHash ?: "")) {
-            // Successful Login
-            isAuthenticated = true
-            lifecycleScope.launch { PrivacyController.unlock() }
-            sessionPassword = password.copyOf() // P0: RAM only
-            failedAttempts = 0
-            saveFailedAttempts(0)
-
-            startServices()
-            loadSensitiveData(p)
-            currentScreenState = Screen.Home
-            return true
-        }
-
-        failedAttempts++
-        saveFailedAttempts(failedAttempts)
-        if (failedAttempts >= Constants.MAX_AUTH_ATTEMPTS) performWipe()
         return false
     }
 
     private fun handleManualRecovery(mnemonic: List<String>) {
         if (MnemonicManager.isValidMnemonic(mnemonic)) {
             try {
-                // Restore identity from mnemonic but force a new password setup
                 val entropy = MnemonicManager.mnemonicToEntropy(mnemonic) ?: throw SecurityException("Invalid Mnemonic")
-                ensureIdentityLinkedToEntropy(entropy)
-                currentSeed = entropy
+                tempEntropy = entropy
 
                 // Clear existing password hash to trigger AuthMode.CREATE
                 getSharedPreferences(Constants.PREFS_NAME, MODE_PRIVATE).edit { remove(Constants.KEY_PASS_HASH) }
@@ -330,12 +304,12 @@ class MainActivity : ComponentActivity() {
 
                 // Re-encrypt seed with new password (Audit P14)
                 val prefs = getSharedPreferences(Constants.PREFS_NAME, MODE_PRIVATE)
-                val salt = getOrCreateSalt()
-                val oldSeedEnc = prefs.getString(Constants.KEY_SAVED_SEED_ENC, null)
-                if (oldSeedEnc != null) {
+                val salt = getSaltForAuth()
+                val identity = PrivacyController.getIdentityContext()
+                if (identity != null) {
                     try {
-                        val dec = E2EManager.decrypt(oldSeedEnc, E2EManager.deriveMnemonicKey(oldPass, salt))
-                        val newSeedEnc = E2EManager.encrypt(dec, E2EManager.deriveMnemonicKey(newPass, salt))
+                        val mnemonicStr = identity.mnemonicWords.joinToString(" ")
+                        val newSeedEnc = E2EManager.encrypt(mnemonicStr, E2EManager.deriveMnemonicKey(newPass, salt))
                         prefs.edit { putString(Constants.KEY_SAVED_SEED_ENC, newSeedEnc) }
                     } catch (e: Exception) {
                         Log.e(TAG, "Failed to migrate encrypted seed during password change", e)
@@ -351,17 +325,17 @@ class MainActivity : ComponentActivity() {
         }
         return false
     }
-    private fun handleSeedRestore(seed: List<String>) { if (MnemonicManager.isValidMnemonic(seed)) { currentSeed = MnemonicManager.mnemonicToEntropy(seed); importBackupLauncher.launch(arrayOf("application/json")) } }
+    private fun handleSeedRestore(seed: List<String>) { if (MnemonicManager.isValidMnemonic(seed)) { tempEntropy = MnemonicManager.mnemonicToEntropy(seed); importBackupLauncher.launch(arrayOf("application/json")) } }
     private fun handleDeleteSession(peer: Peer, messages: MutableList<Message>) { SessionManager.removeSession(peer.onionAddress); messages.clear(); currentScreenState = Screen.Home }
-    private fun handleRemoveSeed() { if (currentSeed != null) { currentSeed = null; Toast.makeText(this, "RIMOSSO", Toast.LENGTH_SHORT).show() } }
+    private fun handleRemoveSeed() { /* Managed by PrivacyController */ }
     private fun handleExportInternal() { exportBackupLauncher.launch("torchat_backup.json") }
 
     private fun handleExport(uri: Uri) {
         try {
             contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_WRITE_URI_PERMISSION or Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            val salt = getOrCreateSalt()
-            val mnemonic = currentSeed?.let { MnemonicManager.entropyToMnemonic(it) } ?: emptyList()
-            val backupJson = backupManager.createEncryptedBackupJson(mnemonic, salt)
+            val mnemonic = identity?.mnemonicWords ?: emptyList()
+            if (mnemonic.isEmpty()) return
+            val backupJson = backupManager.createEncryptedBackupJson(mnemonic, getSaltForAuth())
             contentResolver.openOutputStream(uri)?.use { it.write(backupJson.toByteArray()) }
             currentScreenState = Screen.Home
         } catch (e: Exception) { Log.e(TAG, "Export error", e) }
@@ -371,7 +345,7 @@ class MainActivity : ComponentActivity() {
         try {
             contentResolver.openInputStream(uri)?.use { i ->
                 val pkg = BufferedReader(InputStreamReader(i)).readText()
-                if (backupManager.restoreFromEncryptedBackup(pkg, currentSeed)) {
+                if (backupManager.restoreFromEncryptedBackup(pkg, tempEntropy)) {
                     finish()
                     val restartIntent = Intent(this, MainActivity::class.java)
                     startActivity(restartIntent)
@@ -468,11 +442,11 @@ class MainActivity : ComponentActivity() {
                     val myNonce = ByteArray(16).apply { SecureRandom().nextBytes(this) }
                     val respKeyPair = E2EManager.generateEphemeralKeyPair()
                     val respEKStr = E2EManager.publicKeyToString(respKeyPair.public)
-                    val myIKStr = E2EManager.publicKeyToString(myIdentityKeyPair!!.public)
+                    val myIKStr = E2EManager.publicKeyToString(identity?.identityKeyPair?.public ?: return@launch)
 
                     // Transcript Bob signs: (SenderOnion=Alice, MyOnion=Bob, ikA, eA, ikB, eB, nA, nB)
                     val fullTranscript = E2EManager.buildHandshakeTranscript(senderOnion, myOnion, peerIKStr, peerEKStr, myIKStr, respEKStr, peerNonce, myNonce)
-                    val bobSig = Base64.getEncoder().encodeToString(E2EManager.signData(fullTranscript, myIdentityKeyPair!!.private))
+                    val bobSig = Base64.getEncoder().encodeToString(E2EManager.signData(fullTranscript, identity?.identityKeyPair?.private ?: return))
 
                     // Store pending handshake indexed by Alice's nonce
                     val handshakeId = Base64.getEncoder().encodeToString(peerNonce)
@@ -513,7 +487,7 @@ class MainActivity : ComponentActivity() {
                     var capturedPending: PendingHandshake? = null
                     val success = handshakeManager.verifyAndConsume(nonceAStr) { pending ->
                         capturedPending = pending
-                        val myIKStr = E2EManager.publicKeyToString(myIdentityKeyPair!!.public)
+                        val myIKStr = E2EManager.publicKeyToString(identity?.identityKeyPair?.public ?: return@launch)
                         val fullTranscript = E2EManager.buildHandshakeTranscript(myOnion, senderOnion, myIKStr, E2EManager.publicKeyToString(pending.myEphemeralKeys.public), peerIKStr, peerEKStr, pending.myNonce, peerNonce)
                         E2EManager.verifySignature(fullTranscript, peerSig, peerIdentityKey)
                     }
@@ -522,11 +496,11 @@ class MainActivity : ComponentActivity() {
                     val pending = capturedPending!!
                     val myEphemeral = pending.myEphemeralKeys
                     val myNonce = pending.myNonce
-                    val myIKStr = E2EManager.publicKeyToString(myIdentityKeyPair!!.public)
+                    val myIKStr = E2EManager.publicKeyToString(identity?.identityKeyPair?.public ?: return)
                     val fullTranscript = E2EManager.buildHandshakeTranscript(myOnion, senderOnion, myIKStr, E2EManager.publicKeyToString(myEphemeral.public), peerIKStr, peerEKStr, myNonce, peerNonce)
 
                     // Alice signs same transcript - Step 3
-                    val aliceSig = Base64.getEncoder().encodeToString(E2EManager.signData(fullTranscript, myIdentityKeyPair!!.private))
+                    val aliceSig = Base64.getEncoder().encodeToString(E2EManager.signData(fullTranscript, identity?.identityKeyPair?.private ?: return))
                     val finalData = "$aliceSig|${Base64.getEncoder().encodeToString(myNonce)}|${Base64.getEncoder().encodeToString(peerNonce)}|PFS_FINAL"
                     val finalEnc = Gson().toJson(NetworkPayload(
                         type = PayloadType.SESSION_HANDSHAKE,
@@ -557,7 +531,7 @@ class MainActivity : ComponentActivity() {
                     val success = handshakeManager.verifyAndConsume(nonceAStr) { pending ->
                         capturedPending = pending
                         if (Base64.getEncoder().encodeToString(pending.myNonce) != nonceBStr) return@verifyAndConsume false
-                        val myIKStr = E2EManager.publicKeyToString(myIdentityKeyPair!!.public)
+                        val myIKStr = E2EManager.publicKeyToString(identity?.identityKeyPair?.public ?: return@launch)
                         val fullTranscript = E2EManager.buildHandshakeTranscript(senderOnion, myOnion, pending.peerIdentityKeyStr!!, pending.peerEphemeralKeyStr!!, myIKStr, E2EManager.publicKeyToString(pending.myEphemeralKeys.public), pending.peerNonce!!, pending.myNonce)
                         E2EManager.verifySignature(fullTranscript, aliceSig, peerIdentityKey)
                     }
@@ -566,7 +540,7 @@ class MainActivity : ComponentActivity() {
                     val pending = capturedPending!!
                     val myEphemeral = pending.myEphemeralKeys
                     val peerEKStr = pending.peerEphemeralKeyStr!!
-                    val myIKStr = E2EManager.publicKeyToString(myIdentityKeyPair!!.public)
+                    val myIKStr = E2EManager.publicKeyToString(identity?.identityKeyPair?.public ?: return@launch)
                     val fullTranscript = E2EManager.buildHandshakeTranscript(senderOnion, myOnion, pending.peerIdentityKeyStr!!, peerEKStr, myIKStr, E2EManager.publicKeyToString(myEphemeral.public), pending.peerNonce!!, pending.myNonce)
 
                     val sharedSecret = E2EManager.calculateSharedSecret(myEphemeral.private, E2EManager.stringToPublicKey(peerEKStr, Constants.X25519_ALGO))
@@ -586,11 +560,10 @@ class MainActivity : ComponentActivity() {
         notificationHelper = NotificationHelper(this)
         backupManager = BackupManager(this)
         mediaManager = MediaManager(this)
-
-        // Initialize PrivacyController without callbacks (uses Flow for v5)
         localServer = LocalServer(port = Constants.LOCAL_SERVER_PORT, onPacketReceived = { handleIncomingPacket(it) })
 
         PrivacyController.initialize(
+            this,
             tor = torManager,
             server = localServer!!
         )
@@ -603,13 +576,6 @@ class MainActivity : ComponentActivity() {
         if (!isSystemInitialized) {
             initializeSystem()
             isSystemInitialized = true
-        }
-
-        localServer?.startServer()
-
-        if (torManager.isOrbotInstalled()) {
-            val s = getSharedPreferences(Constants.PREFS_NAME, MODE_PRIVATE).getString(Constants.KEY_ONION, null)
-            if (s != null) torManager.setTorRunning(s) else orbotLauncher.launch(torManager.getOrbotRequestIntent())
         }
     }
 
@@ -628,7 +594,6 @@ class MainActivity : ComponentActivity() {
         expiryDate = p.getLong(Constants.KEY_EXPIRY, 0L)
         peersList.clear()
         peersList.addAll(loadPeersFromPrefs(p))
-        loadOrGenerateIdentityKeys(p)
     }
 
     private fun sendMessage(peer: Peer, content: String, messageList: MutableList<Message>) {
@@ -718,16 +683,16 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun getOrCreateSalt(): ByteArray {
+    private fun getSaltForAuth(): ByteArray {
         val p = getSharedPreferences("secure_prefs_salt", MODE_PRIVATE)
-        val sEnc = p.getString("install_salt_enc", null) ?: return generateAndSaveSalt(p)
+        val sEnc = p.getString("install_salt_enc", null) ?: return generateAndSaveSaltForAuth(p)
         return try {
             Base64.getDecoder().decode(E2EManager.decryptWithHardwareKey(sEnc).getOrThrow())
         } catch (e: Exception) {
-            throw IllegalStateException("Secure storage (Hardware Keystore) is inaccessible.", e)
+            ByteArray(16) // Fallback
         }
     }
-    private fun generateAndSaveSalt(p: android.content.SharedPreferences): ByteArray { val s = ByteArray(16).apply { SecureRandom().nextBytes(this) }; val enc = E2EManager.encryptWithHardwareKey(Base64.getEncoder().encodeToString(s)).getOrNull() ?: ""; p.edit { putString("install_salt_enc", enc) }; return s }
+    private fun generateAndSaveSaltForAuth(p: android.content.SharedPreferences): ByteArray { val s = ByteArray(16).apply { SecureRandom().nextBytes(this) }; val enc = E2EManager.encryptWithHardwareKey(Base64.getEncoder().encodeToString(s)).getOrNull() ?: ""; p.edit { putString("install_salt_enc", enc) }; return s }
     private fun saveThemePreference(d: Boolean) { getSharedPreferences(Constants.PREFS_NAME, MODE_PRIVATE).edit { putBoolean(Constants.KEY_DARK_THEME, d) } }
     private fun saveAvailabilityPreference(a: Boolean) { getSharedPreferences(Constants.PREFS_NAME, MODE_PRIVATE).edit { putBoolean("is_available", a) } }
     private fun savePasswordHash(h: String) { getSharedPreferences(Constants.PREFS_NAME, MODE_PRIVATE).edit { putString(Constants.KEY_PASS_HASH, h) } }
@@ -736,56 +701,14 @@ class MainActivity : ComponentActivity() {
     private fun saveAutoBackupPreference(e: Boolean) { getSharedPreferences(Constants.PREFS_NAME, MODE_PRIVATE).edit { putBoolean(Constants.KEY_AUTO_BACKUP, e) } }
     private fun saveMyAlias(a: String) { getSharedPreferences(Constants.PREFS_NAME, MODE_PRIVATE).edit { putString(Constants.KEY_MY_ALIAS, a) } }
     private fun performWipe() {
-        // P1: Secure Wipe - Wipe keys from RAM first via PrivacyController
-        CoroutineScope(Dispatchers.Main).launch {
-            PrivacyController.lock()
-
-            withContext(Dispatchers.IO) {
-                try {
-                    E2EManager.deleteMasterKey()
-                } catch (e: Exception) { }
-
-                val prefs = listOf(Constants.PREFS_NAME, "secure_prefs_salt", "pairing_prefs")
-                prefs.forEach { name ->
-                    val success = getSharedPreferences(name, MODE_PRIVATE).edit().clear().commit()
-                    if (!success) Log.w(TAG, "Wipe commit failed for $name")
-                }
-
-                val d = File(filesDir, "tor")
-                if (d.exists()) d.deleteRecursively()
-            }
-
-            android.os.Process.killProcess(android.os.Process.myPid())
-            kotlin.system.exitProcess(0)
+        lifecycleScope.launch {
+            PrivacyController.panicWipe()
         }
     }
-    private fun loadOrGenerateIdentityKeys(p: android.content.SharedPreferences) {
-        val seedEnc = p.getString(Constants.KEY_IDENTITY_SEED_ENC, null)
-        if (seedEnc != null) {
-            try {
-                val seed = Base64.getDecoder().decode(E2EManager.decryptWithHardwareKey(seedEnc).getOrThrow())
-                myIdentityKeyPair = E2EManager.ed25519KeyPairFromSeed(seed)
-                p.edit { putString(Constants.KEY_PUBLIC_KEY, E2EManager.publicKeyToString(myIdentityKeyPair!!.public)) }
-            } catch (e: Exception) {
-                Log.e(TAG, "Hardware Keystore failure", e)
-                // P0: Do NOT auto-fallback to mnemonic. Force recovery.
-                currentScreenState = Screen.Recovery
-            }
-        }
-    }
+    private fun handleRemoveSeed() { /* Managed by PrivacyController */ }
 
-    private fun ensureIdentityLinkedToEntropy(entropy: ByteArray) {
-        val identitySeed = HKDF.deriveKey(entropy, null, "TorChat/V2/IdentitySeed".toByteArray(), 32)
-
-        myIdentityKeyPair = E2EManager.ed25519KeyPairFromSeed(identitySeed)
-        val seedEnc = E2EManager.encryptWithHardwareKey(Base64.getEncoder().encodeToString(identitySeed)).getOrNull() ?: ""
-
-        getSharedPreferences(Constants.PREFS_NAME, MODE_PRIVATE).edit {
-            putString(Constants.KEY_IDENTITY_SEED_ENC, seedEnc)
-            putString(Constants.KEY_PUBLIC_KEY, E2EManager.publicKeyToString(myIdentityKeyPair!!.public))
-        }
-    }
     private fun initiateHandshake(p: Peer) {
+        val identity = PrivacyController.getIdentityContext() ?: return
         if (p.identityPublicKey.isEmpty()) return
         if (handshakeLoading[p.onionAddress] == true) return
         handshakeLoading[p.onionAddress] = true
@@ -796,12 +719,12 @@ class MainActivity : ComponentActivity() {
                 val myNonce = ByteArray(16).apply { SecureRandom().nextBytes(this) }
 
                 val eKStr = E2EManager.publicKeyToString(myEphemeralKeyPair.public)
-                val myIKStr = E2EManager.publicKeyToString(myIdentityKeyPair!!.public)
+                val myIKStr = E2EManager.publicKeyToString(identity.identityKeyPair.public)
                 val nonceAStr = Base64.getEncoder().encodeToString(myNonce)
 
                 // Alice signs PFS_INIT (Resolves Audit Point 7)
                 val initTranscript = E2EManager.buildInitTranscript(myOnion, p.onionAddress, myIKStr, eKStr, myNonce)
-                val aliceInitSig = Base64.getEncoder().encodeToString(E2EManager.signData(initTranscript, myIdentityKeyPair!!.private))
+                val aliceInitSig = Base64.getEncoder().encodeToString(E2EManager.signData(initTranscript, identity.identityKeyPair.private))
 
                 // Alice stores pending handshake keyed by her own nonce
                 val pending = PendingHandshake(p.onionAddress, myEphemeralKeyPair, myNonce, null, null, null, handshakeManager.getCurrentTime())
@@ -811,13 +734,19 @@ class MainActivity : ComponentActivity() {
                 val encryptedJson = Gson().toJson(NetworkPayload(type = PayloadType.SESSION_HANDSHAKE, senderOnion = myOnion, recipientOnion = p.onionAddress, payloadData = data)).toByteArray(Charsets.UTF_8)
                 P2PMessenger.sendEncryptedPayload(myOnion, p.onionAddress, PayloadType.SESSION_HANDSHAKE.ordinal.toByte(), 0, "", 0, 0, encryptedJson, timeoutMs = 30000)
             } catch (e: Exception) {
-                // Remove on failure
-            } finally {
-                // Note: handshakeLoading[p.onionAddress] remains true until PFS_ACCEPT is received or timeout
+                handshakeLoading[p.onionAddress] = false
             }
         }
     }
 
-    private fun broadcastMyStatus(a: Boolean) { val my = (torManager.torState.value as? TorState.Running)?.onionAddress ?: ""; if (my.isEmpty()) return; peersList.forEach { val pay = Gson().toJson(NetworkPayload(type = PayloadType.PONG, senderOnion = my, recipientOnion = it.onionAddress, payloadData = if (a) "ONLINE" else "OFFLINE")).toByteArray(Charsets.UTF_8); CoroutineScope(Dispatchers.IO).launch { P2PMessenger.sendEncryptedPayload(my, it.onionAddress, PayloadType.PONG.ordinal.toByte(), 0, "", 0, 0, pay, timeoutMs = 10000) } } }
+    private fun broadcastMyStatus(a: Boolean) {
+        val identity = PrivacyController.getIdentityContext() ?: return
+        val my = (torManager.torState.value as? TorState.Running)?.onionAddress ?: ""
+        if (my.isEmpty()) return
+        peersList.forEach {
+            val pay = Gson().toJson(NetworkPayload(type = PayloadType.PONG, senderOnion = my, recipientOnion = it.onionAddress, payloadData = if (a) "ONLINE" else "OFFLINE")).toByteArray(Charsets.UTF_8)
+            CoroutineScope(Dispatchers.IO).launch { P2PMessenger.sendEncryptedPayload(my, it.onionAddress, PayloadType.PONG.ordinal.toByte(), 0, "", 0, 0, pay, timeoutMs = 10000) }
+        }
+    }
     private fun checkAndRequestPermissions() { val p = mutableListOf(Manifest.permission.CAMERA); if (Build.VERSION.SDK_INT >= 33) p.add(Manifest.permission.POST_NOTIFICATIONS); val missing = p.filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }; if (missing.isNotEmpty()) permissionLauncher.launch(missing.toTypedArray()) }
 }
