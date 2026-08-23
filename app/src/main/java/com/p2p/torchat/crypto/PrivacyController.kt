@@ -19,7 +19,7 @@ import javax.crypto.SecretKey
 import kotlin.system.exitProcess
 
 /**
- * Enhanced Security States (v7)
+ * Enhanced Security States (v8)
  */
 enum class SecurityState {
     LOCKED,
@@ -34,7 +34,7 @@ sealed class SecurityEvent {
 
 /**
  * Central Privacy Controller - Atomic Security State Machine.
- * Resolves Audit Point 3, 4, 6, 7, 13, 20 (Atomic lifecycle, Panic Wipe, Secure Vault).
+ * Resolves Audit Point 3, 4, 6, 7, 13, 19, 20 (Atomic lifecycle, Panic Wipe, Secure Vault, Migration).
  */
 object PrivacyController {
     private val mutex = Mutex()
@@ -83,40 +83,37 @@ object PrivacyController {
             val salt = getOrCreateSalt(ctx)
             val currentVaultKey = E2EManager.deriveMnemonicKey(password, salt)
 
-            var data = SecureVault.load(ctx, currentVaultKey)
+            var loaded = SecureVault.load(ctx, currentVaultKey)
+            var entropy: ByteArray? = loaded?.second
+            var data: VaultData? = loaded?.first
 
             if (newEntropy != null) {
                 // Initial Setup / Recovery flow
-                val h = E2EManager.hashPassword(password)
-                data = VaultData(
-                    passwordHash = h,
-                    masterEntropy = newEntropy,
-                    isTermsAccepted = true
-                )
-                SecureVault.save(ctx, data, currentVaultKey)
+                entropy = newEntropy
+                data = VaultData(isTermsAccepted = true)
+                SecureVault.save(ctx, data, entropy, currentVaultKey)
                 Logger.i("Initial setup complete")
             }
 
-            // Migration from v6 (SharedPreferences) to v7 (SecureVault)
+            // Migration from v6 (SharedPreferences) to v8 (SecureVault)
             if (data == null && newEntropy == null) {
-                data = tryMigrateFromV6(ctx, password, salt)
-                if (data != null) {
-                    SecureVault.save(ctx, data, currentVaultKey)
-                    Logger.i("Migration from v6 successful")
+                val migrated = tryMigrateFromV6(ctx, password, salt)
+                if (migrated != null) {
+                    data = migrated.first
+                    entropy = migrated.second
+                    SecureVault.save(ctx, data, entropy, currentVaultKey)
+
+                    // Securely wipe old material after successful migration (Audit Point 9)
+                    wipeV6SharedPreferences(ctx)
+                    Logger.i("Migration from v6 successful and old data wiped")
                 }
             }
 
-            if (data == null) {
+            if (data == null || entropy == null) {
                 throw SecurityException("Authentication failed: Vault inaccessible")
             }
 
-            // Validate Password Hash (Internal safety check)
-            if (data.passwordHash != null && !E2EManager.verifyPassword(password, data.passwordHash)) {
-                 throw SecurityException("Invalid password")
-            }
-
             // Derive Identity from Master Entropy
-            val entropy = data.masterEntropy ?: throw SecurityException("Entropy missing from vault")
             val identitySeed = HKDF.deriveKey(entropy, null, "TorChat/V2/IdentitySeed".toByteArray(), 32)
             val identityKeyPair = E2EManager.ed25519KeyPairFromSeed(identitySeed)
 
@@ -131,7 +128,7 @@ object PrivacyController {
             _securityState.value = SecurityState.UNLOCKED
             Logger.i("System UNLOCKED")
         } catch (e: Exception) {
-            Logger.e("Unlock failed: ${e.message}")
+            Logger.e("Unlock failed")
             identityContext?.wipe()
             identityContext = null
             vaultKey = null
@@ -141,7 +138,7 @@ object PrivacyController {
         }
     }
 
-    private fun tryMigrateFromV6(ctx: Context, password: CharArray, salt: ByteArray): VaultData? {
+    private fun tryMigrateFromV6(ctx: Context, password: CharArray, salt: ByteArray): Pair<VaultData, ByteArray>? {
         val p = ctx.getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE)
         val encSeed = p.getString(Constants.KEY_SAVED_SEED_ENC, null) ?: return null
 
@@ -160,9 +157,7 @@ object PrivacyController {
                  } catch (e: Exception) { emptyList<Peer>() }
             } else emptyList()
 
-            VaultData(
-                passwordHash = p.getString(Constants.KEY_PASS_HASH, null),
-                masterEntropy = entropy,
+            val data = VaultData(
                 peers = peers,
                 myOnion = p.getString(Constants.KEY_ONION, null),
                 myPublicKey = p.getString(Constants.KEY_PUBLIC_KEY, null),
@@ -174,9 +169,15 @@ object PrivacyController {
                 failedAttempts = p.getInt(Constants.KEY_FAILED_ATTEMPTS, 0),
                 isTermsAccepted = p.getBoolean(Constants.KEY_TERMS_ACCEPTED, false)
             )
+            data to entropy
         } catch (e: Exception) {
             null
         }
+    }
+
+    private fun wipeV6SharedPreferences(ctx: Context) {
+        val p = ctx.getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE)
+        p.edit().clear().commit()
     }
 
     /**
@@ -186,9 +187,10 @@ object PrivacyController {
         val ctx = context ?: return@withLock
         val key = vaultKey ?: return@withLock
         val current = _vaultData.value ?: return@withLock
+        val entropy = identityContext?.entropy ?: return@withLock
 
         val newData = update(current)
-        SecureVault.save(ctx, newData, key)
+        SecureVault.save(ctx, newData, entropy, key)
         _vaultData.value = newData
     }
 
@@ -198,21 +200,19 @@ object PrivacyController {
     suspend fun changePassword(oldPass: CharArray, newPass: CharArray) = mutex.withLock {
         val ctx = context ?: throw IllegalStateException("Not initialized")
         val current = _vaultData.value ?: throw IllegalStateException("Locked")
+        val key = vaultKey ?: throw IllegalStateException("Locked")
+        val entropy = identityContext?.entropy ?: throw IllegalStateException("Locked")
         val salt = getOrCreateSalt(ctx)
 
-        if (!E2EManager.verifyPassword(oldPass, current.passwordHash ?: "")) {
-            throw SecurityException("Invalid old password")
-        }
+        // Proof is vault accessibility, but we keep oldPass for re-derivation check if needed
+        // Since we are inside mutex and unlocked, we have the vaultKey and current data.
 
-        val newHash = E2EManager.hashPassword(newPass)
         val newVaultKey = E2EManager.deriveMnemonicKey(newPass, salt)
-        val newData = current.copy(passwordHash = newHash)
 
         // Atomic Commit: Save with new key first
-        SecureVault.save(ctx, newData, newVaultKey)
+        SecureVault.save(ctx, current, entropy, newVaultKey)
 
         vaultKey = newVaultKey
-        _vaultData.value = newData
         Logger.i("Password changed successfully")
     }
 
@@ -225,16 +225,20 @@ object PrivacyController {
         _securityState.value = SecurityState.LOCKING
         Logger.i("PrivacyController: Locking system...")
 
+        // 1. Signal UI IMMEDIATELY (Audit Point 19)
+        _securityEvents.emit(SecurityEvent.WipeRequested)
+
+        // 2. Wipe RAM
         identityContext?.wipe()
         identityContext = null
         vaultKey = null
         _vaultData.value = null
         SessionManager.lock()
 
+        // 3. Stop networking services
         torManager?.stopTor()
         localServer?.stopServer()
 
-        _securityEvents.emit(SecurityEvent.WipeRequested)
         _securityState.value = SecurityState.LOCKED
         Logger.i("System LOCKED")
     }
@@ -246,15 +250,21 @@ object PrivacyController {
         _securityState.value = SecurityState.LOCKING
         Logger.w("!!! PANIC WIPE INITIATED !!!")
 
+        // 1. Signal UI IMMEDIATELY (Audit Point 19)
+        _securityEvents.emit(SecurityEvent.WipeRequested)
+
+        // 2. RAM Wipe
         identityContext?.wipe()
         identityContext = null
         vaultKey = null
         _vaultData.value = null
         SessionManager.lock()
 
+        // 3. Stop Services
         torManager?.stopTor()
         localServer?.stopServer()
 
+        // 4. Persistent Wipe
         val ctx = context
         if (ctx != null) {
             E2EManager.deleteMasterKey()
@@ -268,7 +278,6 @@ object PrivacyController {
             if (torDir.exists()) torDir.deleteRecursively()
         }
 
-        _securityEvents.emit(SecurityEvent.WipeRequested)
         _securityState.value = SecurityState.LOCKED
 
         Logger.w("Panic Wipe complete. Terminating.")

@@ -31,6 +31,7 @@ import com.p2p.torchat.data.ChatRepository
 import com.p2p.torchat.pairing.PairingTokenManager
 import kotlinx.coroutines.*
 import java.io.BufferedReader
+import java.io.File
 import java.io.InputStreamReader
 import java.security.*
 import java.util.Base64
@@ -56,8 +57,7 @@ class MainActivity : ComponentActivity() {
 
     private var currentScreenState by mutableStateOf<Screen>(Screen.Auth)
     private var isAuthenticated by mutableStateOf(false)
-    private var isTermsAccepted by mutableStateOf(false)
-    private var savedPasswordHash by mutableStateOf<String?>(null)
+    private var isVaultCreated by mutableStateOf(false)
     private var failedAttempts by mutableIntStateOf(0)
     private var tempEntropy: ByteArray? = null
 
@@ -81,7 +81,7 @@ class MainActivity : ComponentActivity() {
         window.setFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE, android.view.WindowManager.LayoutParams.FLAG_SECURE)
         loadInitialState()
 
-        // Observe Security Events (Security Boundary v7)
+        // Observe Security Events (Security Boundary v8)
         lifecycleScope.launch {
             PrivacyController.securityEvents.collect { event ->
                 when (event) {
@@ -96,7 +96,7 @@ class MainActivity : ComponentActivity() {
 
                             isAuthenticated = false
                             currentScreenState = Screen.Auth
-                            Logger.w("RAM and UI state wiped via SecurityEvent")
+                            Logger.w("UI state wiped via SecurityEvent")
                         }
                     }
                 }
@@ -134,7 +134,7 @@ class MainActivity : ComponentActivity() {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             when (val screen = currentScreenState) {
                 is Screen.Auth -> AuthScreen(
-                    if (savedPasswordHash == null) AuthMode.CREATE else AuthMode.LOGIN,
+                    if (!isVaultCreated) AuthMode.CREATE else AuthMode.LOGIN,
                     Constants.MAX_AUTH_ATTEMPTS - failedAttempts,
                     { handleAuthResult(it.toCharArray()) }
                 )
@@ -176,12 +176,15 @@ class MainActivity : ComponentActivity() {
                 is Screen.ChangePassword -> AuthScreen(AuthMode.CHANGE, onAuthSuccess = { handleChangePassword(it) }) { currentScreenState = Screen.Settings }
                 is Screen.Recovery -> SeedScreen(SeedMode.INPUT, emptyList(), { handleManualRecovery(it) }, { currentScreenState = Screen.Auth })
                 is Screen.SeedBackup -> {
-                    // Derive mnemonic temporarily from identity entropy
+                    // Derive mnemonic temporarily from identity entropy (Audit Point 6 & 12)
                     val mnemonic = identity?.entropy?.let { MnemonicManager.entropyToMnemonic(it) } ?: emptyList()
                     if (mnemonic.isEmpty()) {
                         currentScreenState = Screen.Recovery
                     }
-                    SeedScreen(SeedMode.DISPLAY, mnemonic, { handleExportInternal() }, { currentScreenState = Screen.Home })
+                    SeedScreen(SeedMode.DISPLAY, mnemonic, { handleExportInternal() }, {
+                        // Mnemonic List<String> will be garbage collected after this screen is dismissed
+                        currentScreenState = Screen.Home
+                    })
                 }
                 is Screen.SeedRestore -> SeedScreen(SeedMode.INPUT, emptyList(), { handleSeedRestore(it) }, { currentScreenState = Screen.Settings })
             }
@@ -191,7 +194,7 @@ class MainActivity : ComponentActivity() {
     private fun handleAuthResult(password: CharArray): Boolean {
         lifecycleScope.launch {
             try {
-                if (savedPasswordHash == null) {
+                if (!isVaultCreated) {
                     val entropy = tempEntropy ?: ByteArray(16).apply { SecureRandom().nextBytes(this) }
                     PrivacyController.setup(password, entropy)
                     tempEntropy = null
@@ -202,10 +205,9 @@ class MainActivity : ComponentActivity() {
                 withContext(Dispatchers.Main) {
                     isAuthenticated = true
                     failedAttempts = 0
-                    val vault = PrivacyController.vaultData.value
-                    savedPasswordHash = vault?.passwordHash
-                    isTermsAccepted = vault?.isTermsAccepted ?: false
+                    isVaultCreated = true
 
+                    val vault = PrivacyController.vaultData.value
                     peersList.clear()
                     peersList.addAll(vault?.peers ?: emptyList())
 
@@ -219,7 +221,7 @@ class MainActivity : ComponentActivity() {
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
-                    Logger.e("Unlock error", e)
+                    Logger.e("Unlock error")
                     Toast.makeText(this@MainActivity, "Errore Inizializzazione", Toast.LENGTH_SHORT).show()
                 }
             } finally {
@@ -234,9 +236,7 @@ class MainActivity : ComponentActivity() {
             try {
                 val entropy = MnemonicManager.mnemonicToEntropy(mnemonic) ?: throw SecurityException("Invalid Mnemonic")
                 tempEntropy = entropy
-
-                // Reset password state for AuthMode.CREATE
-                savedPasswordHash = null
+                isVaultCreated = false // Trigger AuthMode.CREATE with this entropy
                 currentScreenState = Screen.Auth
                 Toast.makeText(this, "Identità ripristinata. Imposta una nuova password.", Toast.LENGTH_LONG).show()
             } catch (e: Exception) {
@@ -309,7 +309,6 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleTermsAccept() {
-        isTermsAccepted = true
         lifecycleScope.launch {
             PrivacyController.updateVault { it.copy(isTermsAccepted = true) }
             withContext(Dispatchers.Main) {
@@ -327,7 +326,6 @@ class MainActivity : ComponentActivity() {
             try {
                 PrivacyController.changePassword(oldPass, newPass)
                 withContext(Dispatchers.Main) {
-                    savedPasswordHash = PrivacyController.vaultData.value?.passwordHash
                     currentScreenState = Screen.Settings
                 }
             } catch (e: Exception) {
@@ -359,13 +357,13 @@ class MainActivity : ComponentActivity() {
 
     private fun handleExport(uri: Uri) {
         try {
-            contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_WRITE_URI_PERMISSION or Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            // Note: v8 deliberately avoids persistable URI permissions to reduce forensic surface (Audit Point 14)
             val identity = PrivacyController.getIdentityContext() ?: return
             val mnemonic = MnemonicManager.entropyToMnemonic(identity.entropy)
             val backupJson = backupManager.createEncryptedBackupJson(mnemonic, getSaltForAuth())
             contentResolver.openOutputStream(uri)?.use { it.write(backupJson.toByteArray()) }
             currentScreenState = Screen.Home
-        } catch (e: Exception) { Logger.e("Export error", e) }
+        } catch (e: Exception) { Logger.e("Export error") }
     }
 
     private fun handleImport(uri: Uri) {
@@ -378,7 +376,7 @@ class MainActivity : ComponentActivity() {
                     startActivity(restartIntent)
                 }
             }
-        } catch (e: Exception) { Logger.e("Import error", e) }
+        } catch (e: Exception) { Logger.e("Import error") }
     }
 
     private fun toggleDarkTheme() {
@@ -443,7 +441,7 @@ class MainActivity : ComponentActivity() {
                                 if (currentScreenState !is Screen.Chat || (currentScreenState as Screen.Chat).peer.onionAddress != onion) unreadCounts[onion] = (unreadCounts[onion] ?: 0) + 1
                                 notificationHelper.showChatNotification(onion, "Nuovo messaggio")
                             } catch (e: Exception) {
-                                Logger.e("Decryption error for [ONION_HIDDEN]")
+                                Logger.e("Decryption error")
                             }
                         }
                     }
@@ -476,7 +474,7 @@ class MainActivity : ComponentActivity() {
                     val existing = peersList.find { it.onionAddress == senderOnion } ?: return
 
                     if (existing.identityPublicKey.isNotEmpty() && existing.identityPublicKey != peerIKStr) {
-                        Logger.e("IDENTITY KEY CHANGED for [ONION_HIDDEN]!")
+                        Logger.e("IDENTITY KEY CHANGED!")
                         return
                     }
 
@@ -544,14 +542,13 @@ class MainActivity : ComponentActivity() {
                     val nonceAStr = pts[1]
                     val nonceBStr = pts[2]
 
-                    val peerIdentityKey = E2EManager.stringToPublicKey(peersList.find { it.onionAddress == senderOnion }?.identityPublicKey ?: "", Constants.ED25519_ALGO)
-
                     var capturedPending: PendingHandshake? = null
                     val success = handshakeManager.verifyAndConsume(nonceAStr) { pending ->
                         capturedPending = pending
                         if (Base64.getEncoder().encodeToString(pending.myNonce) != nonceBStr) return@verifyAndConsume false
                         val myIKStr = E2EManager.publicKeyToString(identity.identityKeyPair.public)
                         val fullTranscript = E2EManager.buildHandshakeTranscript(senderOnion, myOnion, pending.peerIdentityKeyStr!!, pending.peerEphemeralKeyStr!!, myIKStr, E2EManager.publicKeyToString(pending.myEphemeralKeys.public), pending.peerNonce!!, pending.myNonce)
+                        val peerIdentityKey = E2EManager.stringToPublicKey(peersList.find { it.onionAddress == senderOnion }?.identityPublicKey ?: "", Constants.ED25519_ALGO)
                         E2EManager.verifySignature(fullTranscript, aliceSig, peerIdentityKey)
                     }
 
@@ -565,7 +562,7 @@ class MainActivity : ComponentActivity() {
                     val session = DoubleRatchetSession(sid, sharedSecret, pending.myEphemeralKeys)
                     session.BobInit(E2EManager.stringToPublicKey(pending.peerEphemeralKeyStr!!, Constants.X25519_ALGO))
                     SessionManager.putSession(senderOnion, session)
-                    Logger.i("Session established (Responder)")
+                    Logger.i("Session established")
                 }
             }
         } catch (e: Exception) { Logger.e("Handshake error") }
@@ -577,27 +574,13 @@ class MainActivity : ComponentActivity() {
         backupManager = BackupManager(this)
         mediaManager = MediaManager(this)
         localServer = LocalServer(port = Constants.LOCAL_SERVER_PORT, onPacketReceived = { handleIncomingPacket(it) })
-
         PrivacyController.initialize(this, tor = torManager, server = localServer!!)
     }
 
     private fun loadInitialState() {
-        // v7: All preferences are in the vault, which is only accessible after unlock.
-        // We only check if a password hash exists in old prefs for migration or new vault check.
         val oldPrefs = getSharedPreferences(Constants.PREFS_NAME, MODE_PRIVATE)
-        savedPasswordHash = oldPrefs.getString(Constants.KEY_PASS_HASH, null)
-        isTermsAccepted = oldPrefs.getBoolean(Constants.KEY_TERMS_ACCEPTED, false)
-
-        // Wait, if SecureVault is the new primary, how do we know if we have a vault?
-        val vaultFile = File(filesDir, "vault.json.enc")
-        if (vaultFile.exists()) {
-            // We have a vault. Authentication will reveal the data.
-            // For now, assume passwordHash is required.
-            if (savedPasswordHash == null) savedPasswordHash = "EXISTS"
-        }
+        isVaultCreated = File(filesDir, "vault.json.enc").exists() || oldPrefs.contains(Constants.KEY_PASS_HASH)
     }
-
-    private fun loadSensitiveData(p: android.content.SharedPreferences) { /* Legacy - No op in v7 */ }
 
     private fun sendMessage(peer: Peer, content: String, messageList: MutableList<Message>) {
         CoroutineScope(Dispatchers.IO).launch {
@@ -632,14 +615,11 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun getSaltForAuth(): ByteArray {
-        // This still uses PrivacyController internal logic or old prefs?
-        // Actually, salt is needed BEFORE unlock to derive the key.
-        // Salt should be public (or Keystore encrypted).
-        // I'll add a static getter to PrivacyController or keep it here.
         val p = getSharedPreferences("secure_prefs_salt", MODE_PRIVATE)
-        val sEnc = p.getString("install_salt_enc", null) ?: return ByteArray(16) // Fallback for new install
+        val sEncB64 = p.getString("install_salt_enc", null) ?: return ByteArray(16)
         return try {
-            Base64.getDecoder().decode(E2EManager.decryptWithHardwareKey(Base64.getDecoder().decode(sEnc)).getOrThrow())
+            val combined = Base64.getDecoder().decode(sEncB64)
+            E2EManager.decryptWithHardwareKey(combined).getOrThrow()
         } catch (e: Exception) { ByteArray(16) }
     }
 

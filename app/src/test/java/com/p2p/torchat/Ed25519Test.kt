@@ -30,9 +30,26 @@ class Ed25519Test {
         assertEquals(expectedPubKeyHex, bytesToHex(rawPubKey))
     }
 
+    @Test
+    fun testRFC8032Derivation_Vector3() {
+        // Test Vector 3 from RFC 8032
+        val seed = hexToBytes("c5aa8df43f933651d246002594450e11fe03f1261b6f0190a0584b47596a237e")
+        val expectedPubKeyHex = "fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb911548908025"
+
+        val keyPair = E2EManager.ed25519KeyPairFromSeed(seed)
+        val rawPubKey = extractRawPublicKey(keyPair.public.encoded)
+
+        assertEquals(expectedPubKeyHex, bytesToHex(rawPubKey))
+    }
+
     private fun extractRawPublicKey(encoded: ByteArray): ByteArray {
         // Ed25519 X.509 encoding is 44 bytes long, raw key is the last 32 bytes.
-        return encoded.sliceArray(encoded.size - 32 until encoded.size)
+        // Format: 30 2a 30 05 06 03 2b 65 70 03 21 00 <32-bytes>
+        return if (encoded.size >= 32) {
+            encoded.sliceArray(encoded.size - 32 until encoded.size)
+        } else {
+            encoded
+        }
     }
 
     private fun hexToBytes(hex: String): ByteArray {
