@@ -70,7 +70,7 @@ class MainActivity : ComponentActivity() {
     private var savedPasswordHash by mutableStateOf<String?>(null)
     private var sessionPassword by mutableStateOf<CharArray?>(null)
     private var failedAttempts by mutableIntStateOf(0)
-    private var currentSeed by mutableStateOf<List<String>>(emptyList())
+    private var currentSeed: ByteArray? = null // P0: Raw 16-byte entropy (Security Boundary v5)
 
     private var myAlias by mutableStateOf("Amico")
     private var isDarkTheme by mutableStateOf(true)
@@ -97,6 +97,33 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         window.setFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE, android.view.WindowManager.LayoutParams.FLAG_SECURE)
         loadPreferences()
+
+        // Observe Security Events (Security Boundary v5)
+        lifecycleScope.launch {
+            PrivacyController.securityEvents.collect { event ->
+                when (event) {
+                    is SecurityEvent.WipeRequested -> {
+                        withContext(Dispatchers.Main) {
+                            messagesMap.clear()
+                            peersList.clear()
+                            unreadCounts.clear()
+                            activeChatMessages = null
+                            activeChatPeer = null
+
+                            myIdentityKeyPair = null
+                            sessionPassword?.fill('\u0000')
+                            sessionPassword = null
+                            currentSeed?.fill(0)
+                            currentSeed = null
+
+                            isAuthenticated = false
+                            currentScreenState = Screen.Auth
+                            Log.i(TAG, "RAM state wiped via SecurityEvent")
+                        }
+                    }
+                }
+            }
+        }
 
         setContent {
             TorP2PChatTheme(darkTheme = isDarkTheme) {
@@ -143,7 +170,7 @@ class MainActivity : ComponentActivity() {
                 is Screen.ChangePassword -> AuthScreen(AuthMode.CHANGE, onAuthSuccess = { handleChangePassword(it) }) { currentScreenState = Screen.Settings }
                 is Screen.Recovery -> SeedScreen(SeedMode.INPUT, emptyList(), { handleManualRecovery(it) }, { currentScreenState = Screen.Auth })
                 is Screen.SeedBackup -> {
-                    if (currentSeed.isEmpty()) {
+                    if (currentSeed == null) {
                         val p = getSharedPreferences(Constants.PREFS_NAME, MODE_PRIVATE)
                         val salt = getOrCreateSalt()
                         val seedEnc = p.getString(Constants.KEY_SAVED_SEED_ENC, null)
@@ -151,7 +178,7 @@ class MainActivity : ComponentActivity() {
                         if (seedEnc != null && pass != null) {
                             try {
                                 val dec = E2EManager.decrypt(seedEnc, E2EManager.deriveMnemonicKey(pass, salt))
-                                currentSeed = dec.split(" ")
+                                currentSeed = MnemonicManager.mnemonicToEntropy(dec.split(" "))
                             } catch (e: Exception) {
                                 currentScreenState = Screen.Recovery
                             }
@@ -159,7 +186,8 @@ class MainActivity : ComponentActivity() {
                             currentScreenState = Screen.Recovery
                         }
                     }
-                    SeedScreen(SeedMode.DISPLAY, currentSeed, { handleExportInternal() }, { currentScreenState = Screen.Home })
+                    val mnemonic = currentSeed?.let { MnemonicManager.entropyToMnemonic(it) } ?: emptyList()
+                    SeedScreen(SeedMode.DISPLAY, mnemonic, { handleExportInternal() }, { currentScreenState = Screen.Home })
                 }
                 is Screen.SeedRestore -> SeedScreen(SeedMode.INPUT, emptyList(), { handleSeedRestore(it) }, { currentScreenState = Screen.Settings })
             }
@@ -176,18 +204,19 @@ class MainActivity : ComponentActivity() {
             savedPasswordHash = h
             sessionPassword = password.copyOf() // P0: RAM only
 
-            val mnemonic = if (currentSeed.isNotEmpty()) currentSeed else MnemonicManager.generateMnemonic()
-            currentSeed = mnemonic
+            val entropy = currentSeed ?: ByteArray(16).apply { SecureRandom().nextBytes(this) }
+            currentSeed = entropy
             val salt = getOrCreateSalt()
-            val encMnemonic = E2EManager.encrypt(mnemonic.joinToString(" "), E2EManager.deriveMnemonicKey(password, salt))
+            val mnemonicWords = MnemonicManager.entropyToMnemonic(entropy)
+            val encMnemonic = E2EManager.encrypt(mnemonicWords.joinToString(" "), E2EManager.deriveMnemonicKey(password, salt))
 
             p.edit {
                 putString(Constants.KEY_SAVED_SEED_ENC, encMnemonic)
             }
 
-            ensureIdentityLinkedToMnemonic(mnemonic)
+            ensureIdentityLinkedToEntropy(entropy)
             isAuthenticated = true
-            PrivacyController.unlock()
+            lifecycleScope.launch { PrivacyController.unlock() }
             failedAttempts = 0
             saveFailedAttempts(0)
 
@@ -200,7 +229,7 @@ class MainActivity : ComponentActivity() {
         if (E2EManager.verifyPassword(password, savedPasswordHash ?: "")) {
             // Successful Login
             isAuthenticated = true
-            PrivacyController.unlock()
+            lifecycleScope.launch { PrivacyController.unlock() }
             sessionPassword = password.copyOf() // P0: RAM only
             failedAttempts = 0
             saveFailedAttempts(0)
@@ -221,8 +250,9 @@ class MainActivity : ComponentActivity() {
         if (MnemonicManager.isValidMnemonic(mnemonic)) {
             try {
                 // Restore identity from mnemonic but force a new password setup
-                ensureIdentityLinkedToMnemonic(mnemonic)
-                currentSeed = mnemonic
+                val entropy = MnemonicManager.mnemonicToEntropy(mnemonic) ?: throw SecurityException("Invalid Mnemonic")
+                ensureIdentityLinkedToEntropy(entropy)
+                currentSeed = entropy
 
                 // Clear existing password hash to trigger AuthMode.CREATE
                 getSharedPreferences(Constants.PREFS_NAME, MODE_PRIVATE).edit { remove(Constants.KEY_PASS_HASH) }
@@ -321,16 +351,17 @@ class MainActivity : ComponentActivity() {
         }
         return false
     }
-    private fun handleSeedRestore(seed: List<String>) { if (MnemonicManager.isValidMnemonic(seed)) { currentSeed = seed; importBackupLauncher.launch(arrayOf("application/json")) } }
+    private fun handleSeedRestore(seed: List<String>) { if (MnemonicManager.isValidMnemonic(seed)) { currentSeed = MnemonicManager.mnemonicToEntropy(seed); importBackupLauncher.launch(arrayOf("application/json")) } }
     private fun handleDeleteSession(peer: Peer, messages: MutableList<Message>) { SessionManager.removeSession(peer.onionAddress); messages.clear(); currentScreenState = Screen.Home }
-    private fun handleRemoveSeed() { if (currentSeed.isNotEmpty()) { currentSeed = emptyList(); Toast.makeText(this, "RIMOSSO", Toast.LENGTH_SHORT).show() } }
+    private fun handleRemoveSeed() { if (currentSeed != null) { currentSeed = null; Toast.makeText(this, "RIMOSSO", Toast.LENGTH_SHORT).show() } }
     private fun handleExportInternal() { exportBackupLauncher.launch("torchat_backup.json") }
 
     private fun handleExport(uri: Uri) {
         try {
             contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_WRITE_URI_PERMISSION or Intent.FLAG_GRANT_READ_URI_PERMISSION)
             val salt = getOrCreateSalt()
-            val backupJson = backupManager.createEncryptedBackupJson(currentSeed, salt)
+            val mnemonic = currentSeed?.let { MnemonicManager.entropyToMnemonic(it) } ?: emptyList()
+            val backupJson = backupManager.createEncryptedBackupJson(mnemonic, salt)
             contentResolver.openOutputStream(uri)?.use { it.write(backupJson.toByteArray()) }
             currentScreenState = Screen.Home
         } catch (e: Exception) { Log.e(TAG, "Export error", e) }
@@ -556,19 +587,12 @@ class MainActivity : ComponentActivity() {
         backupManager = BackupManager(this)
         mediaManager = MediaManager(this)
 
-        // Initialize PrivacyController with callbacks to MainActivity
+        // Initialize PrivacyController without callbacks (uses Flow for v5)
         localServer = LocalServer(port = Constants.LOCAL_SERVER_PORT, onPacketReceived = { handleIncomingPacket(it) })
 
         PrivacyController.initialize(
             tor = torManager,
-            server = localServer!!,
-            wipeMessages = { messagesMap.clear(); activeChatMessages = null; activeChatPeer = null },
-            wipeIdentity = {
-                myIdentityKeyPair = null
-                sessionPassword?.fill('\u0000')
-                sessionPassword = null
-                currentSeed = emptyList()
-            }
+            server = localServer!!
         )
 
         val isHardware = E2EManager.isHardwareBacked()
@@ -750,8 +774,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun ensureIdentityLinkedToMnemonic(mnemonic: List<String>) {
-        val entropy = MnemonicManager.mnemonicToEntropy(mnemonic) ?: throw SecurityException("Invalid mnemonic")
+    private fun ensureIdentityLinkedToEntropy(entropy: ByteArray) {
         val identitySeed = HKDF.deriveKey(entropy, null, "TorChat/V2/IdentitySeed".toByteArray(), 32)
 
         myIdentityKeyPair = E2EManager.ed25519KeyPairFromSeed(identitySeed)
