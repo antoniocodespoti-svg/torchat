@@ -144,15 +144,25 @@ object PrivacyController {
         val encSeed = p.getString(Constants.KEY_SAVED_SEED_ENC, null) ?: return null
 
         return try {
-            // v6 used HKDF, so we still use it for migration
-            val mnemonicKey = E2EManager.deriveKeyFromSecret(p.getString(Constants.KEY_PASS_HASH, "") ?: "", salt)
-            // Wait, v6 implementation used deriveMnemonicKey which was HKDF directly.
-            // I'll try to find the exact v6 derivation.
+            // v6 used HKDF directly on password
             val derived = HKDF.deriveKey(password.toUtf8ByteArray_v6(), salt, "TorChat/v2/storage/mnemonic".toByteArray(), 32)
             val key = javax.crypto.spec.SecretKeySpec(derived, "AES")
 
             val mnemonicWords = E2EManager.decrypt(encSeed, key).split(" ")
             val entropy = MnemonicManager.mnemonicToEntropy(mnemonicWords) ?: return null
+
+            // Wipe derived key material
+            derived.fill(0)
+
+            val peersJson = p.getString(Constants.KEY_SAVED_PEERS, null)
+            val peers = if (peersJson != null) {
+                 val hash = p.getString(Constants.KEY_PASS_HASH, "") ?: ""
+                 try {
+                     val pk = E2EManager.deriveKeyFromSecret(hash, salt)
+                     val dec = E2EManager.decrypt(peersJson, pk)
+                     com.google.gson.Gson().fromJson(dec, object : com.google.gson.reflect.TypeToken<List<Peer>>() {}.type)
+                 } catch (e: Exception) { emptyList<Peer>() }
+            } else emptyList()
 
             val data = VaultData(
                 myOnion = p.getString(Constants.KEY_ONION, null),

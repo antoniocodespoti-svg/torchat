@@ -162,10 +162,11 @@ class DoubleRatchetSession(
             tempSkipped.values.forEach { it.fill(0) }
             throw e
         } finally {
-            // Memory Hygiene: Explicitly zero out snapshots (Audit Point)
+            // Memory Hygiene: Explicitly zero out snapshots (Audit Point 21)
             snapshotRootKey.fill(0)
             snapshotSendCK?.fill(0)
             snapshotRecvCK?.fill(0)
+            tempSkipped.values.forEach { it.fill(0) }
         }
     }
 
@@ -232,16 +233,23 @@ class DoubleRatchetSession(
 
     /**
      * Securely wipes all cryptographic material from RAM and marks session as destroyed.
-     * Resolves Audit Point 14.
+     * Resolves Audit Point 13 & 21 (Double Ratchet key zeroization).
      */
     suspend fun destroy() = mutex.withLock {
         if (isDestroyed) return@withLock
+
+        // 1. Wipe chain keys
         rootKey.fill(0)
         sendChainKey?.fill(0)
         receiveChainKey?.fill(0)
+
+        // 2. Wipe skipped message keys
         skippedMessageKeys.values.forEach { it.fill(0) }
         skippedMessageKeys.clear()
 
+        // 3. Clear references
+        sendChainKey = null
+        receiveChainKey = null
         myRatchetKeyPair = null
         peerRatchetPublicKey = null
         isDestroyed = true

@@ -116,48 +116,41 @@ object E2EManager {
 
     /**
      * Derives an Ed25519 KeyPair deterministically from a 32-byte seed.
-     * RFC 8032 compliant derivation.
+     * RFC 8032 compliant derivation using Bouncy Castle.
      * Resolves Audit Point 7 (Provider-independent Ed25519).
      */
     fun ed25519KeyPairFromSeed(seed: ByteArray): KeyPair {
         require(seed.size == 32) { "Seed must be 32 bytes" }
 
+        // Use Bouncy Castle for standard-compliant scalar multiplication
+        val bcPriv = org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters(seed, 0)
+        val bcPub = bcPriv.generatePublicKey()
+
+        val pubBytes = bcPub.getEncoded()
+        val privBytes = bcPriv.getEncoded()
+
         val kf = KeyFactory.getInstance(Constants.ED25519_ALGO)
 
-        // Construct PKCS#8 for Private Key (RFC 8032: seed = private key)
+        // Construct PKCS#8 for JCA PrivateKey
         val pkcs8Prefix = byteArrayOf(
             0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20
         )
         val pkcs8Bytes = ByteArray(pkcs8Prefix.size + seed.size)
         System.arraycopy(pkcs8Prefix, 0, pkcs8Bytes, 0, pkcs8Prefix.size)
         System.arraycopy(seed, 0, pkcs8Bytes, pkcs8Prefix.size, seed.size)
-
         val priv = kf.generatePrivate(PKCS8EncodedKeySpec(pkcs8Bytes))
 
-        // Deterministic Public Key derivation.
-        // We use a strict deterministic byte stream to feed the generator.
-        val kg = KeyPairGenerator.getInstance(Constants.ED25519_ALGO)
-        val deterministicSr = object : SecureRandom() {
-            private var offset = 0
-            override fun nextBytes(bytes: ByteArray) {
-                for (i in bytes.indices) {
-                    bytes[i] = seed[offset % seed.size]
-                    offset++
-                }
-            }
-        }
+        // Construct X.509 for JCA PublicKey
+        // Prefix: 30 2a 30 05 06 03 2b 65 70 03 21 00
+        val x509Prefix = byteArrayOf(
+            0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00
+        )
+        val x509Bytes = ByteArray(x509Prefix.size + pubBytes.size)
+        System.arraycopy(x509Prefix, 0, x509Bytes, 0, x509Prefix.size)
+        System.arraycopy(pubBytes, 0, x509Bytes, x509Prefix.size, pubBytes.size)
+        val pub = kf.generatePublic(X509EncodedKeySpec(x509Bytes))
 
-        if (Build.VERSION.SDK_INT >= 33) {
-            kg.initialize(java.security.spec.NamedParameterSpec.ED25519, deterministicSr)
-        } else {
-            kg.initialize(256, deterministicSr)
-        }
-
-        val pair = kg.generateKeyPair()
-
-        // Final Safety Check: Ensure the PrivateKey we constructed matches the one from the generator
-        // by verifying they produce the same public key.
-        return KeyPair(pair.public, priv)
+        return KeyPair(pub, priv)
     }
 
     fun signData(data: ByteArray, priv: PrivateKey): ByteArray {

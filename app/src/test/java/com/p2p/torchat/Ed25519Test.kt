@@ -10,18 +10,21 @@ class Ed25519Test {
 
     @Test
     fun testRFC8032Derivation_Vector1() {
+        // RFC 8032 Test Vector 1 (Message: empty)
         val seed = hexToBytes("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60")
         val expectedPubKeyHex = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+        val expectedSigHex = "e5564300c360ac72908f0c19862b7030911fb22064132470792348574708767746522c16daed577a44c4b693bc2f50d995c6c2a66e6b528a9b70868f0011400a"
 
         val keyPair = E2EManager.ed25519KeyPairFromSeed(seed)
         val rawPubKey = extractRawPublicKey(keyPair.public.encoded)
 
-        assertEquals(expectedPubKeyHex, bytesToHex(rawPubKey))
+        assertEquals("Public key mismatch", expectedPubKeyHex, bytesToHex(rawPubKey))
 
-        // Test Signature for Vector 1
-        val message = "test message".toByteArray()
-        val sig = E2EManager.signData(message, keyPair.private)
-        assertTrue(E2EManager.verifySignature(message, sig, keyPair.public))
+        // Test Signature for Vector 1 (Empty Message)
+        val emptyMessage = ByteArray(0)
+        val sig = E2EManager.signData(emptyMessage, keyPair.private)
+        assertEquals("Signature mismatch", expectedSigHex, bytesToHex(sig))
+        assertTrue("Verification failed", E2EManager.verifySignature(emptyMessage, sig, keyPair.public))
     }
 
     @Test

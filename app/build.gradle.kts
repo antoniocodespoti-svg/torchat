@@ -94,6 +94,7 @@ dependencies {
     // JSON Parsing & Crypto Helpers
     implementation("com.google.code.gson:gson:2.10.1")
     implementation("com.lambdapioneer.argon2kt:argon2kt:1.6.0")
+    implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
 
     // QR Code Generation & Scanning
     implementation("com.google.zxing:core:3.5.3")
