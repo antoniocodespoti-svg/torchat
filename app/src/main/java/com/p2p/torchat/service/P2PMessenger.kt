@@ -54,10 +54,7 @@ object P2PMessenger {
 
                 val dos = DataOutputStream(socket.getOutputStream())
 
-                // Add bucketed padding to the binary data to hide exact length
-                val dataBytes = addBucketedPadding(encryptedData)
-
-                if (dataBytes.size > 1048576) {
+                if (encryptedData.size > 1048576) {
                     return@withContext Result.failure(IllegalArgumentException("Payload exceeds 1MB limit"))
                 }
 
@@ -82,8 +79,8 @@ object P2PMessenger {
                 dos.writeInt(n)
 
                 // 5. Write Payload Length & Data
-                dos.writeInt(dataBytes.size)
-                dos.write(dataBytes)
+                dos.writeInt(encryptedData.size)
+                dos.write(encryptedData)
                 dos.flush()
 
                 socket.close()

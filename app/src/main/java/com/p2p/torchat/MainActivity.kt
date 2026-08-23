@@ -90,19 +90,12 @@ class MainActivity : ComponentActivity() {
     }
     private val permissionLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { _ -> }
 
+    private var isSystemInitialized by mutableStateOf(false)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.setFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE, android.view.WindowManager.LayoutParams.FLAG_SECURE)
-        initializeSystem()
         loadPreferences()
-
-        val localServer = LocalServer(port = Constants.LOCAL_SERVER_PORT, onPacketReceived = { handleIncomingPacket(it) })
-        localServer.startServer()
-
-        if (torManager.isOrbotInstalled()) {
-            val s = getSharedPreferences(Constants.PREFS_NAME, MODE_PRIVATE).getString(Constants.KEY_ONION, null)
-            if (s != null) torManager.setTorRunning(s) else orbotLauncher.launch(torManager.getOrbotRequestIntent())
-        }
 
         setContent {
             TorP2PChatTheme(darkTheme = isDarkTheme) {
@@ -115,7 +108,11 @@ class MainActivity : ComponentActivity() {
 
     @Composable
     private fun AppMainContent() {
-        val torState by torManager.torState.collectAsState()
+        val torState = if (isSystemInitialized) {
+            torManager.torState.collectAsState().value
+        } else {
+            TorState.Stopped
+        }
         val myOnion = (torState as? TorState.Running)?.onionAddress ?: ""
 
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
@@ -164,13 +161,13 @@ class MainActivity : ComponentActivity() {
         val p = getSharedPreferences(Constants.PREFS_NAME, MODE_PRIVATE)
 
         if (savedPasswordHash == null) {
-            // Initial Setup
+            // Initial Setup or Recovery Completion
             val h = E2EManager.hashPassword(password)
             savePasswordHash(h)
             savedPasswordHash = h
             sessionPassword = password // P0: RAM only
 
-            val mnemonic = MnemonicManager.generateMnemonic()
+            val mnemonic = if (currentSeed.isNotEmpty()) currentSeed else MnemonicManager.generateMnemonic()
             currentSeed = mnemonic
             val salt = getOrCreateSalt()
             val encMnemonic = E2EManager.encrypt(mnemonic.joinToString(" "), E2EManager.deriveMnemonicKey(password, salt))
@@ -183,7 +180,9 @@ class MainActivity : ComponentActivity() {
             isAuthenticated = true
             failedAttempts = 0
             saveFailedAttempts(0)
-            loadOrGenerateIdentityKeys(p) // Identity loaded ONLY after auth
+
+            startServices()
+            loadSensitiveData(p)
             currentScreenState = Screen.Home
             return true
         }
@@ -195,7 +194,8 @@ class MainActivity : ComponentActivity() {
             failedAttempts = 0
             saveFailedAttempts(0)
 
-            loadOrGenerateIdentityKeys(p) // Identity loaded ONLY after auth
+            startServices()
+            loadSensitiveData(p)
             currentScreenState = Screen.Home
             return true
         }
@@ -209,13 +209,16 @@ class MainActivity : ComponentActivity() {
     private fun handleManualRecovery(mnemonic: List<String>) {
         if (MnemonicManager.isValidMnemonic(mnemonic)) {
             try {
+                // Restore identity from mnemonic but force a new password setup
                 ensureIdentityLinkedToMnemonic(mnemonic)
                 currentSeed = mnemonic
-                // We don't have the password here if we came from Keystore failure at startup,
-                // but if we are here, we might need to reset the password or re-encrypt the seed later.
-                // For now, just restore identity and go to Home.
-                currentScreenState = Screen.Home
-                Toast.makeText(this, "ID Ripristinato", Toast.LENGTH_SHORT).show()
+
+                // Clear existing password hash to trigger AuthMode.CREATE
+                getSharedPreferences(Constants.PREFS_NAME, MODE_PRIVATE).edit { remove(Constants.KEY_PASS_HASH) }
+                savedPasswordHash = null
+
+                currentScreenState = Screen.Auth
+                Toast.makeText(this, "Identità ripristinata. Imposta una nuova password.", Toast.LENGTH_LONG).show()
             } catch (e: Exception) {
                 Toast.makeText(this, "Errore Ripristino", Toast.LENGTH_SHORT).show()
             }
@@ -540,17 +543,38 @@ class MainActivity : ComponentActivity() {
         val isHardware = E2EManager.isHardwareBacked()
         Log.i(TAG, "Hardware Keystore backed: $isHardware")
     }
+
+    private fun startServices() {
+        if (!isSystemInitialized) {
+            initializeSystem()
+            isSystemInitialized = true
+        }
+
+        val localServer = LocalServer(port = Constants.LOCAL_SERVER_PORT, onPacketReceived = { handleIncomingPacket(it) })
+        localServer.startServer()
+
+        if (torManager.isOrbotInstalled()) {
+            val s = getSharedPreferences(Constants.PREFS_NAME, MODE_PRIVATE).getString(Constants.KEY_ONION, null)
+            if (s != null) torManager.setTorRunning(s) else orbotLauncher.launch(torManager.getOrbotRequestIntent())
+        }
+    }
+
     private fun loadPreferences() {
         val p = getSharedPreferences(Constants.PREFS_NAME, MODE_PRIVATE)
         myAlias = p.getString(Constants.KEY_MY_ALIAS, "Amico") ?: "Amico"
         isDarkTheme = p.getBoolean(Constants.KEY_DARK_THEME, true)
-        isAutoBackupEnabled = p.getBoolean(Constants.KEY_AUTO_BACKUP, false)
         isTermsAccepted = p.getBoolean(Constants.KEY_TERMS_ACCEPTED, false)
         savedPasswordHash = p.getString(Constants.KEY_PASS_HASH, null)
         failedAttempts = p.getInt(Constants.KEY_FAILED_ATTEMPTS, 0)
-        expiryDate = p.getLong(Constants.KEY_EXPIRY, 0L)
         currentScreenState = if (!isTermsAccepted) Screen.TermsOfUse else Screen.Auth
-        peersList.clear(); peersList.addAll(loadPeersFromPrefs(p))
+    }
+
+    private fun loadSensitiveData(p: android.content.SharedPreferences) {
+        isAutoBackupEnabled = p.getBoolean(Constants.KEY_AUTO_BACKUP, false)
+        expiryDate = p.getLong(Constants.KEY_EXPIRY, 0L)
+        peersList.clear()
+        peersList.addAll(loadPeersFromPrefs(p))
+        loadOrGenerateIdentityKeys(p)
     }
 
     private fun sendMessage(peer: Peer, content: String, messageList: MutableList<Message>) {
@@ -659,9 +683,11 @@ class MainActivity : ComponentActivity() {
     private fun saveMyAlias(a: String) { getSharedPreferences(Constants.PREFS_NAME, MODE_PRIVATE).edit { putString(Constants.KEY_MY_ALIAS, a) } }
     private fun performWipe() {
         // P1: Secure Wipe - Wipe keys from RAM first
-        CoroutineScope(Dispatchers.Main).launch {
-            SessionManager.lock()
+        SessionManager.lock()
+        sessionPassword = null
+        currentSeed = emptyList()
 
+        CoroutineScope(Dispatchers.Main).launch {
             withContext(Dispatchers.IO) {
                 try {
                     E2EManager.deleteMasterKey()
@@ -678,7 +704,6 @@ class MainActivity : ComponentActivity() {
             }
 
             android.os.Process.killProcess(android.os.Process.myPid())
-            sessionPassword = null // P0: Wipe from RAM
             kotlin.system.exitProcess(0)
         }
     }

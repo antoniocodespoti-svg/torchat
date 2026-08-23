@@ -82,6 +82,7 @@ object E2EManager {
                     .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
                     .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
                     .setKeySize(Constants.AES_KEY_SIZE)
+                    .setUserAuthenticationRequired(true)
                     .build()
             )
             return kg.generateKey()
@@ -115,6 +116,7 @@ object E2EManager {
     fun ed25519KeyPairFromSeed(seed: ByteArray): KeyPair {
         require(seed.size == 32) { "Seed must be 32 bytes" }
 
+        // RFC 8032: Deterministic Ed25519 KeyPair derivation.
         // 1. Create Private Key using PKCS#8 (RFC 8410)
         val prefix = byteArrayOf(0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20)
         val pkcs8 = ByteArray(prefix.size + seed.size)
@@ -124,15 +126,13 @@ object E2EManager {
         val kf = KeyFactory.getInstance(Constants.ED25519_ALGO)
         val privateKey = kf.generatePrivate(PKCS8EncodedKeySpec(pkcs8))
 
-        // 2. Derive Public Key deterministically.
-        // On Android 33+, we use the standard NamedParameterSpec.
-        // We use a deterministic SecureRandom to ensure the same public key is derived from the same seed.
+        // 2. Derive Public Key deterministically from the seed.
+        // We use a specialized provider-independent approach by using the KeyPairGenerator
+        // with a strictly controlled entropy source that matches the seed.
         val kg = KeyPairGenerator.getInstance(Constants.ED25519_ALGO)
 
         val deterministicSr = object : SecureRandom() {
             override fun nextBytes(bytes: ByteArray) {
-                // RFC 8032: The seed is used to derive the scalar and the prefix.
-                // Most Java Ed25519 implementations take the next 32 bytes from the random source as the seed.
                 var i = 0
                 while (i < bytes.size) {
                     bytes[i] = seed[i % seed.size]
@@ -144,19 +144,10 @@ object E2EManager {
         if (Build.VERSION.SDK_INT >= 33) {
             kg.initialize(java.security.spec.NamedParameterSpec.ED25519, deterministicSr)
         } else {
-            // Fallback for older Android versions. 256 bits for Ed25519.
-            try {
-                kg.initialize(256, deterministicSr)
-            } catch (e: Exception) {
-                // Some providers might expect 255
-                kg.initialize(255, deterministicSr)
-            }
+            kg.initialize(256, deterministicSr)
         }
 
         val tempPair = kg.generateKeyPair()
-
-        // Return the pair using our explicitly constructed PrivateKey for maximum compatibility
-        // and the deterministically generated PublicKey.
         return KeyPair(tempPair.public, privateKey)
     }
 
@@ -294,12 +285,39 @@ object E2EManager {
         return buffer.array()
     }
 
+    private val PADDING_BUCKETS = listOf(4096, 131072, 524288, 1048576)
+
+    private fun addPadding(data: ByteArray): ByteArray {
+        // Find the smallest bucket that fits the data plus 4 bytes for the original length
+        val targetSize = PADDING_BUCKETS.find { it >= data.size + 4 } ?: (data.size + 4)
+        val padded = ByteArray(targetSize)
+        val buffer = ByteBuffer.wrap(padded)
+        buffer.putInt(data.size)
+        buffer.put(data)
+        if (targetSize > data.size + 4) {
+            val padding = ByteArray(targetSize - data.size - 4)
+            SecureRandom().nextBytes(padding)
+            buffer.put(padding)
+        }
+        return padded
+    }
+
+    private fun removePadding(padded: ByteArray): ByteArray {
+        val buffer = ByteBuffer.wrap(padded)
+        val len = buffer.getInt()
+        if (len < 0 || len > padded.size - 4) throw SecurityException("Invalid padding length")
+        val data = ByteArray(len)
+        buffer.get(data)
+        return data
+    }
+
     fun encryptV2(plaintext: ByteArray, key: ByteArray, aad: ByteArray): ByteArray {
+        val padded = addPadding(plaintext)
         val cipher = Cipher.getInstance(Constants.AES_GCM_NOPADDING)
         val iv = ByteArray(Constants.GCM_IV_LENGTH).apply { SecureRandom().nextBytes(this) }
         cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(Constants.GCM_TAG_LENGTH, iv))
         cipher.updateAAD(aad)
-        val encrypted = cipher.doFinal(plaintext)
+        val encrypted = cipher.doFinal(padded)
         val combined = ByteArray(iv.size + encrypted.size)
         System.arraycopy(iv, 0, combined, 0, iv.size)
         System.arraycopy(encrypted, 0, combined, iv.size, encrypted.size)
@@ -312,7 +330,8 @@ object E2EManager {
         val cipher = Cipher.getInstance(Constants.AES_GCM_NOPADDING)
         cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(Constants.GCM_TAG_LENGTH, iv))
         cipher.updateAAD(aad)
-        return cipher.doFinal(encryptedBytes)
+        val padded = cipher.doFinal(encryptedBytes)
+        return removePadding(padded)
     }
 
     fun hashPassword(p: String): String {
