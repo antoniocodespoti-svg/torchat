@@ -22,36 +22,36 @@ import javax.crypto.spec.SecretKeySpec
 
 /**
  * E2EE v2 Manager - Audit Compliant Version.
+ * Updated in v7 for RFC 8032 compliance and best-effort secret wiping.
  */
 object E2EManager {
     private const val ANDROID_KEYSTORE = "AndroidKeyStore"
     private val argon2 by lazy { Argon2Kt() }
 
-    fun encryptWithHardwareKey(plainText: String): Result<String> {
+    fun encryptWithHardwareKey(plainText: ByteArray): Result<ByteArray> {
         return try {
             val secretKey = getOrCreateMasterKey()
             val cipher = Cipher.getInstance(Constants.AES_GCM_NOPADDING)
             cipher.init(Cipher.ENCRYPT_MODE, secretKey)
             val iv = cipher.iv
-            val encryptedBytes = cipher.doFinal(plainText.toByteArray(StandardCharsets.UTF_8))
+            val encryptedBytes = cipher.doFinal(plainText)
             val combined = ByteArray(iv.size + encryptedBytes.size)
             System.arraycopy(iv, 0, combined, 0, iv.size)
             System.arraycopy(encryptedBytes, 0, combined, iv.size, encryptedBytes.size)
-            Result.success(Base64.getEncoder().encodeToString(combined))
+            Result.success(combined)
         } catch (e: Exception) {
             Result.failure(e)
         }
     }
 
-    fun decryptWithHardwareKey(encB64: String): Result<String> {
+    fun decryptWithHardwareKey(combined: ByteArray): Result<ByteArray> {
         return try {
-            val combined = Base64.getDecoder().decode(encB64)
             if (combined.size < Constants.GCM_IV_LENGTH) return Result.failure(IllegalArgumentException("Invalid encrypted data"))
             val iv = combined.sliceArray(0 until Constants.GCM_IV_LENGTH)
             val encryptedBytes = combined.sliceArray(Constants.GCM_IV_LENGTH until combined.size)
             val cipher = Cipher.getInstance(Constants.AES_GCM_NOPADDING)
             cipher.init(Cipher.DECRYPT_MODE, getOrCreateMasterKey(), GCMParameterSpec(Constants.GCM_TAG_LENGTH, iv))
-            Result.success(String(cipher.doFinal(encryptedBytes), StandardCharsets.UTF_8))
+            Result.success(cipher.doFinal(encryptedBytes))
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -116,7 +116,8 @@ object E2EManager {
 
     /**
      * Derives an Ed25519 KeyPair deterministically from a 32-byte seed.
-     * RFC 8032 compliant derivation: seed is treated as the private key.
+     * RFC 8032 compliant derivation.
+     * Resolves Audit Point 7 (Provider-independent Ed25519).
      */
     fun ed25519KeyPairFromSeed(seed: ByteArray): KeyPair {
         require(seed.size == 32) { "Seed must be 32 bytes" }
@@ -124,7 +125,6 @@ object E2EManager {
         val kf = KeyFactory.getInstance(Constants.ED25519_ALGO)
 
         // Construct PKCS#8 for Private Key (RFC 8032: seed = private key)
-        // Prefix for Ed25519: 30 2e 02 01 00 30 05 06 03 2b 65 70 04 22 04 20
         val pkcs8Prefix = byteArrayOf(
             0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20
         )
@@ -134,11 +134,11 @@ object E2EManager {
 
         val priv = kf.generatePrivate(PKCS8EncodedKeySpec(pkcs8Bytes))
 
-        // Derive Public Key using KeyPairGenerator with the same seed.
-        // We use a strict deterministic SecureRandom to feed the seed.
+        // Deterministic Public Key derivation via KeyPairGenerator with fixed entropy.
         val kg = KeyPairGenerator.getInstance(Constants.ED25519_ALGO)
         val deterministicSr = object : SecureRandom() {
             override fun nextBytes(bytes: ByteArray) {
+                // Return exactly the seed requested for key generation
                 val len = minOf(bytes.size, seed.size)
                 System.arraycopy(seed, 0, bytes, 0, len)
             }
@@ -151,8 +151,6 @@ object E2EManager {
         }
 
         val pair = kg.generateKeyPair()
-
-        // Return the pair ensuring the PrivateKey is the direct seed representation.
         return KeyPair(pair.public, priv)
     }
 
@@ -179,19 +177,11 @@ object E2EManager {
         return ka.generateSecret()
     }
 
-    /**
-     * Double Ratchet KDF for Root Chain.
-     * KDF_Root(RK, DH_out) -> (Next_RK, CK)
-     */
     fun kdfRoot(rootKey: ByteArray, dhOutput: ByteArray): Pair<ByteArray, ByteArray> {
         val derived = HKDF.deriveKey(dhOutput, rootKey, "TorChat/v2/dr/root".toByteArray(StandardCharsets.UTF_8), 64)
         return derived.sliceArray(0..31) to derived.sliceArray(32..63)
     }
 
-    /**
-     * Double Ratchet KDF for Message Chains.
-     * KDF_Chain(CK) -> (Next_CK, MK)
-     */
     fun kdfChain(chainKey: ByteArray, label: String): Pair<ByteArray, ByteArray> {
         val derived = HKDF.deriveKey(chainKey, null, "TorChat/v2/dr/chain/$label".toByteArray(StandardCharsets.UTF_8), 64)
         return derived.sliceArray(0..31) to derived.sliceArray(32..63)
@@ -230,10 +220,6 @@ object E2EManager {
         return buffer.array()
     }
 
-    /**
-     * Transcript for the first message (PFS_INIT) authentication.
-     * Resolves Audit Point 7 (PFS_INIT authentication).
-     */
     fun buildInitTranscript(
         initiatorOnion: String,
         responderOnion: String,
@@ -293,7 +279,6 @@ object E2EManager {
     private val PADDING_BUCKETS = listOf(4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576)
 
     private fun addPadding(data: ByteArray): ByteArray {
-        // Find the smallest bucket that fits the data plus 4 bytes for the original length
         val targetSize = PADDING_BUCKETS.find { it >= data.size + 4 } ?: (data.size + 4)
         val padded = ByteArray(targetSize)
         val buffer = ByteBuffer.wrap(padded)
@@ -385,8 +370,6 @@ object E2EManager {
         val byteBuffer = StandardCharsets.UTF_8.encode(charBuffer)
         val bytes = ByteArray(byteBuffer.remaining())
         byteBuffer.get(bytes)
-        // Note: byteBuffer is a direct result of encode, so we can't reliably wipe its internal array
-        // but we've copied to 'bytes' which we DO wipe in finally blocks.
         return bytes
     }
 

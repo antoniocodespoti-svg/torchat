@@ -35,19 +35,29 @@ class NotificationHelper(private val context: Context) {
         sender: String,
         message: String,
     ) {
-        // Resolves Audit Point 4: Privacy - Never show plaintext in notifications
+        // Resolves Audit Point 17: Privacy - Do not show contact alias
         val builder =
             NotificationCompat.Builder(context, CHANNEL_ID)
                 .setSmallIcon(android.R.drawable.ic_dialog_info)
                 .setContentTitle("TorChat")
-                .setContentText("Nuovo messaggio ricevuto") // Generic message
+                .setContentText("Nuovo messaggio") // Fully obfuscated
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setDefaults(NotificationCompat.DEFAULT_ALL)
                 .setAutoCancel(true)
-                .setVisibility(NotificationCompat.VISIBILITY_SECRET) // Hide from lockscreen
+                .setVisibility(NotificationCompat.VISIBILITY_SECRET)
 
         val notificationManager: NotificationManager =
             context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        notificationManager.notify(System.currentTimeMillis().toInt(), builder.build())
+        notificationManager.notify(1001, builder.build()) // Use constant ID to avoid spamming shade
+    }
+
+    /**
+     * Cancels all active notifications.
+     * Resolves Audit Point 17 (Wipe notifications on PANIC).
+     */
+    fun cancelAll() {
+        val notificationManager: NotificationManager =
+            context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        notificationManager.cancelAll()
     }
 }
