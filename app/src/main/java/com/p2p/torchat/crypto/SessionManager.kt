@@ -15,25 +15,23 @@ object SessionManager {
         activeSessions[peerOnion] = session
     }
 
-    fun removeSession(peerOnion: String): DoubleRatchetSession? = activeSessions.remove(peerOnion)
+    suspend fun removeAndDestroySession(peerOnion: String) {
+        activeSessions.remove(peerOnion)?.destroy()
+    }
 
     fun hasSession(peerOnion: String): Boolean = activeSessions.containsKey(peerOnion)
 
-    fun destroyAll() {
-        activeSessions.values.forEach { session ->
-            // Use a coroutine scope to destroy sessions if necessary,
-            // but for simplicity in a singleton we might just call a sync wipe
-            // or let the session handle its own cleanup.
-            // DoubleRatchetSession.destroy() is suspend, so we need to handle that.
-        }
+    /**
+     * Securely destroys all active sessions and wipes cryptographic material.
+     */
+    suspend fun destroyAll() {
+        activeSessions.values.forEach { it.destroy() }
         activeSessions.clear()
     }
 
     /**
-     * Securely locks the application by destroying all active sessions.
+     * Alias for destroyAll() to maintain backward compatibility if needed,
+     * but ensuring it follows the new suspend protocol.
      */
-    suspend fun lock() {
-        activeSessions.values.forEach { it.destroy() }
-        activeSessions.clear()
-    }
+    suspend fun lock() = destroyAll()
 }

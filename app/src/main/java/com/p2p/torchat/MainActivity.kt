@@ -50,6 +50,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var notificationHelper: NotificationHelper
     private lateinit var backupManager: BackupManager
     private lateinit var mediaManager: MediaManager
+    private var localServer: LocalServer? = null
 
     private val chatRepository by lazy { ChatRepository(P2PMessenger, torManager) }
 
@@ -67,7 +68,7 @@ class MainActivity : ComponentActivity() {
     private var isAuthenticated by mutableStateOf(false)
     private var isTermsAccepted by mutableStateOf(false)
     private var savedPasswordHash by mutableStateOf<String?>(null)
-    private var sessionPassword by mutableStateOf<String?>(null)
+    private var sessionPassword by mutableStateOf<CharArray?>(null)
     private var failedAttempts by mutableIntStateOf(0)
     private var currentSeed by mutableStateOf<List<String>>(emptyList())
 
@@ -108,6 +109,14 @@ class MainActivity : ComponentActivity() {
 
     @Composable
     private fun AppMainContent() {
+        val securityState by PrivacyController.securityState.collectAsState()
+
+        if (securityState == SecurityState.LOCKED && isAuthenticated) {
+            // Force return to Auth screen if locked but was authenticated
+            isAuthenticated = false
+            currentScreenState = Screen.Auth
+        }
+
         val torState = if (isSystemInitialized) {
             torManager.torState.collectAsState().value
         } else {
@@ -117,7 +126,7 @@ class MainActivity : ComponentActivity() {
 
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             when (val screen = currentScreenState) {
-                is Screen.Auth -> AuthScreen(if (savedPasswordHash == null) AuthMode.CREATE else AuthMode.LOGIN, Constants.MAX_AUTH_ATTEMPTS - failedAttempts, { handleAuthResult(it) })
+                is Screen.Auth -> AuthScreen(if (savedPasswordHash == null) AuthMode.CREATE else AuthMode.LOGIN, Constants.MAX_AUTH_ATTEMPTS - failedAttempts, { handleAuthResult(it.toCharArray()) })
                 is Screen.Subscription -> SubscriptionScreen(myOnion) { handleSubscription(it, myOnion) }
                 is Screen.Home -> HomeScreen(torState, myOnion, myAlias, myIdentityKeyPair?.let { E2EManager.publicKeyToString(it.public) } ?: "", isDarkTheme, isAvailable, expiryDate, peersList, unreadCounts, peerToConfirmWithKey, { isDarkTheme = !isDarkTheme; saveThemePreference(isDarkTheme) }, { isAvailable = !isAvailable; saveAvailabilityPreference(isAvailable); broadcastMyStatus(isAvailable) }, { myAlias = it; saveMyAlias(it) }, { a, o, k -> handleAddPeer(a, o, k) }, { handleSelectPeer(it) }, { currentScreenState = Screen.QRCode }, { currentScreenState = Screen.QRScanner }, { currentScreenState = Screen.Settings }, { torManager.setTorRunning(it) }, { peersList.remove(it); savePeers() }, { peerToConfirmWithKey = null })
                 is Screen.Chat -> {
@@ -157,7 +166,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun handleAuthResult(password: String): Boolean {
+    private fun handleAuthResult(password: CharArray): Boolean {
         val p = getSharedPreferences(Constants.PREFS_NAME, MODE_PRIVATE)
 
         if (savedPasswordHash == null) {
@@ -165,7 +174,7 @@ class MainActivity : ComponentActivity() {
             val h = E2EManager.hashPassword(password)
             savePasswordHash(h)
             savedPasswordHash = h
-            sessionPassword = password // P0: RAM only
+            sessionPassword = password.copyOf() // P0: RAM only
 
             val mnemonic = if (currentSeed.isNotEmpty()) currentSeed else MnemonicManager.generateMnemonic()
             currentSeed = mnemonic
@@ -178,6 +187,7 @@ class MainActivity : ComponentActivity() {
 
             ensureIdentityLinkedToMnemonic(mnemonic)
             isAuthenticated = true
+            PrivacyController.unlock()
             failedAttempts = 0
             saveFailedAttempts(0)
 
@@ -190,7 +200,8 @@ class MainActivity : ComponentActivity() {
         if (E2EManager.verifyPassword(password, savedPasswordHash ?: "")) {
             // Successful Login
             isAuthenticated = true
-            sessionPassword = password // P0: RAM only
+            PrivacyController.unlock()
+            sessionPassword = password.copyOf() // P0: RAM only
             failedAttempts = 0
             saveFailedAttempts(0)
 
@@ -278,30 +289,35 @@ class MainActivity : ComponentActivity() {
     }
     private fun handleChangePassword(data: String): Boolean {
         val p = data.removePrefix("VERIFY:").split("|")
-        val oldPass = p[0]
-        val newPass = p[1]
+        val oldPass = p[0].toCharArray()
+        val newPass = p[1].toCharArray()
 
-        if (E2EManager.verifyPassword(oldPass, savedPasswordHash ?: "")) {
-            val h = E2EManager.hashPassword(newPass)
-            savePasswordHash(h)
-            savedPasswordHash = h
+        try {
+            if (E2EManager.verifyPassword(oldPass, savedPasswordHash ?: "")) {
+                val h = E2EManager.hashPassword(newPass)
+                savePasswordHash(h)
+                savedPasswordHash = h
 
-            // Re-encrypt seed with new password (Audit P14)
-            val prefs = getSharedPreferences(Constants.PREFS_NAME, MODE_PRIVATE)
-            val salt = getOrCreateSalt()
-            val oldSeedEnc = prefs.getString(Constants.KEY_SAVED_SEED_ENC, null)
-            if (oldSeedEnc != null) {
-                try {
-                    val dec = E2EManager.decrypt(oldSeedEnc, E2EManager.deriveMnemonicKey(oldPass, salt))
-                    val newSeedEnc = E2EManager.encrypt(dec, E2EManager.deriveMnemonicKey(newPass, salt))
-                    prefs.edit { putString(Constants.KEY_SAVED_SEED_ENC, newSeedEnc) }
-                } catch (e: Exception) {
-                    Log.e(TAG, "Failed to migrate encrypted seed during password change", e)
+                // Re-encrypt seed with new password (Audit P14)
+                val prefs = getSharedPreferences(Constants.PREFS_NAME, MODE_PRIVATE)
+                val salt = getOrCreateSalt()
+                val oldSeedEnc = prefs.getString(Constants.KEY_SAVED_SEED_ENC, null)
+                if (oldSeedEnc != null) {
+                    try {
+                        val dec = E2EManager.decrypt(oldSeedEnc, E2EManager.deriveMnemonicKey(oldPass, salt))
+                        val newSeedEnc = E2EManager.encrypt(dec, E2EManager.deriveMnemonicKey(newPass, salt))
+                        prefs.edit { putString(Constants.KEY_SAVED_SEED_ENC, newSeedEnc) }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed to migrate encrypted seed during password change", e)
+                    }
                 }
-            }
 
-            currentScreenState = Screen.Settings
-            return true
+                currentScreenState = Screen.Settings
+                return true
+            }
+        } finally {
+            oldPass.fill('\u0000')
+            newPass.fill('\u0000')
         }
         return false
     }
@@ -540,6 +556,21 @@ class MainActivity : ComponentActivity() {
         backupManager = BackupManager(this)
         mediaManager = MediaManager(this)
 
+        // Initialize PrivacyController with callbacks to MainActivity
+        localServer = LocalServer(port = Constants.LOCAL_SERVER_PORT, onPacketReceived = { handleIncomingPacket(it) })
+
+        PrivacyController.initialize(
+            tor = torManager,
+            server = localServer!!,
+            wipeMessages = { messagesMap.clear(); activeChatMessages = null; activeChatPeer = null },
+            wipeIdentity = {
+                myIdentityKeyPair = null
+                sessionPassword?.fill('\u0000')
+                sessionPassword = null
+                currentSeed = emptyList()
+            }
+        )
+
         val isHardware = E2EManager.isHardwareBacked()
         Log.i(TAG, "Hardware Keystore backed: $isHardware")
     }
@@ -550,8 +581,7 @@ class MainActivity : ComponentActivity() {
             isSystemInitialized = true
         }
 
-        val localServer = LocalServer(port = Constants.LOCAL_SERVER_PORT, onPacketReceived = { handleIncomingPacket(it) })
-        localServer.startServer()
+        localServer?.startServer()
 
         if (torManager.isOrbotInstalled()) {
             val s = getSharedPreferences(Constants.PREFS_NAME, MODE_PRIVATE).getString(Constants.KEY_ONION, null)
@@ -682,12 +712,10 @@ class MainActivity : ComponentActivity() {
     private fun saveAutoBackupPreference(e: Boolean) { getSharedPreferences(Constants.PREFS_NAME, MODE_PRIVATE).edit { putBoolean(Constants.KEY_AUTO_BACKUP, e) } }
     private fun saveMyAlias(a: String) { getSharedPreferences(Constants.PREFS_NAME, MODE_PRIVATE).edit { putString(Constants.KEY_MY_ALIAS, a) } }
     private fun performWipe() {
-        // P1: Secure Wipe - Wipe keys from RAM first
-        SessionManager.lock()
-        sessionPassword = null
-        currentSeed = emptyList()
-
+        // P1: Secure Wipe - Wipe keys from RAM first via PrivacyController
         CoroutineScope(Dispatchers.Main).launch {
+            PrivacyController.lock()
+
             withContext(Dispatchers.IO) {
                 try {
                     E2EManager.deleteMasterKey()

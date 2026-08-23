@@ -55,15 +55,20 @@ class BackupManager(private val context: Context) {
             )
 
         val jsonPayload = gson.toJson(payload)
-        val encryptionKey = E2EManager.deriveKeyFromPassword(seed.joinToString(" "), salt)
-        val encrypted = E2EManager.encrypt(jsonPayload, encryptionKey)
+        val seedChars = seed.joinToString(" ").toCharArray()
+        try {
+            val encryptionKey = E2EManager.deriveKeyFromPassword(seedChars, salt)
+            val encrypted = E2EManager.encrypt(jsonPayload, encryptionKey)
 
-        val portable =
-            PortableBackup(
-                salt = Base64.getEncoder().encodeToString(salt),
-                encryptedPayload = encrypted,
-            )
-        return gson.toJson(portable)
+            val portable =
+                PortableBackup(
+                    salt = Base64.getEncoder().encodeToString(salt),
+                    encryptedPayload = encrypted,
+                )
+            return gson.toJson(portable)
+        } finally {
+            seedChars.fill('\u0000')
+        }
     }
 
     fun restoreFromEncryptedBackup(
@@ -73,27 +78,32 @@ class BackupManager(private val context: Context) {
         return try {
             val portable = gson.fromJson(backupJson, PortableBackup::class.java)
             val salt = Base64.getDecoder().decode(portable.salt)
-            val encryptionKey = E2EManager.deriveKeyFromPassword(seed.joinToString(" "), salt)
+            val seedChars = seed.joinToString(" ").toCharArray()
 
-            val jsonPayload = E2EManager.decrypt(portable.encryptedPayload, encryptionKey)
-            val data = gson.fromJson(jsonPayload, BackupPayload::class.java)
+            try {
+                val encryptionKey = E2EManager.deriveKeyFromPassword(seedChars, salt)
+                val jsonPayload = E2EManager.decrypt(portable.encryptedPayload, encryptionKey)
+                val data = gson.fromJson(jsonPayload, BackupPayload::class.java)
 
-            // Verification of restore integrity (Audit Point 11)
-            val idSeed = com.p2p.torchat.crypto.HKDF.deriveKey(MnemonicManager.mnemonicToEntropy(seed)!!, null, "TorChat/V2/IdentitySeed".toByteArray(), 32)
-            val idKeyPair = E2EManager.ed25519KeyPairFromSeed(idSeed)
-            val derivedPK = E2EManager.publicKeyToString(idKeyPair.public)
+                // Verification of restore integrity (Audit Point 11)
+                val idSeed = com.p2p.torchat.crypto.HKDF.deriveKey(MnemonicManager.mnemonicToEntropy(seed)!!, null, "TorChat/V2/IdentitySeed".toByteArray(), 32)
+                val idKeyPair = E2EManager.ed25519KeyPairFromSeed(idSeed)
+                val derivedPK = E2EManager.publicKeyToString(idKeyPair.public)
 
-            if (derivedPK != data.identityPublicKey) {
-                return false // Mismatch detected
+                if (derivedPK != data.identityPublicKey) {
+                    return false // Mismatch detected
+                }
+
+                context.getSharedPreferences("tor_chat_prefs", Context.MODE_PRIVATE).edit().apply {
+                    putString("my_alias", data.myAlias)
+                    putLong("account_expiry_date", data.accountExpiryDate)
+                    putString("saved_peers", serializePeers(data.peers))
+                    apply()
+                }
+                true
+            } finally {
+                seedChars.fill('\u0000')
             }
-
-            context.getSharedPreferences("tor_chat_prefs", Context.MODE_PRIVATE).edit().apply {
-                putString("my_alias", data.myAlias)
-                putLong("account_expiry_date", data.accountExpiryDate)
-                putString("saved_peers", serializePeers(data.peers))
-                apply()
-            }
-            true
         } catch (e: Exception) {
             false
         }

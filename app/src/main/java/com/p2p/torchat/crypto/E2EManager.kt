@@ -97,11 +97,16 @@ object E2EManager {
         } catch (e: Exception) { }
     }
 
-    fun deriveKeyFromPassword(password: String, salt: ByteArray): SecretKeySpec {
-        val result = argon2.hash(Argon2Mode.ARGON2_ID, password.toByteArray(), salt, Constants.ARGON2_ITERATIONS, Constants.ARGON2_MEMORY, Constants.ARGON2_PARALLELISM, Constants.ARGON2_HASH_LENGTH)
-        val raw = ByteArray(Constants.ARGON2_HASH_LENGTH)
-        result.rawHash[raw]
-        return SecretKeySpec(raw, "AES")
+    fun deriveKeyFromPassword(password: CharArray, salt: ByteArray): SecretKeySpec {
+        val passBytes = String(password).toByteArray(StandardCharsets.UTF_8)
+        try {
+            val result = argon2.hash(Argon2Mode.ARGON2_ID, passBytes, salt, Constants.ARGON2_ITERATIONS, Constants.ARGON2_MEMORY, Constants.ARGON2_PARALLELISM, Constants.ARGON2_HASH_LENGTH)
+            val raw = ByteArray(Constants.ARGON2_HASH_LENGTH)
+            result.rawHash[raw]
+            return SecretKeySpec(raw, "AES")
+        } finally {
+            passBytes.fill(0)
+        }
     }
 
     /**
@@ -111,7 +116,10 @@ object E2EManager {
 
     /**
      * Derives an Ed25519 KeyPair deterministically from a 32-byte seed.
-     * Fully RFC 8032 compliant derivation.
+     * WARNING: This implementation uses a deterministic SecureRandom hack to derive the public key
+     * via the platform KeyPairGenerator. While it attempts to be RFC 8032 compliant by providing
+     * the seed as entropy, its behavior depends on the underlying JCE provider.
+     * Verification via RFC 8032 test vectors is required for each platform/provider.
      */
     fun ed25519KeyPairFromSeed(seed: ByteArray): KeyPair {
         require(seed.size == 32) { "Seed must be 32 bytes" }
@@ -285,7 +293,7 @@ object E2EManager {
         return buffer.array()
     }
 
-    private val PADDING_BUCKETS = listOf(4096, 131072, 524288, 1048576)
+    private val PADDING_BUCKETS = listOf(4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576)
 
     private fun addPadding(data: ByteArray): ByteArray {
         // Find the smallest bucket that fits the data plus 4 bytes for the original length
@@ -334,12 +342,24 @@ object E2EManager {
         return removePadding(padded)
     }
 
-    fun hashPassword(p: String): String {
+    fun hashPassword(p: CharArray): String {
         val salt = ByteArray(16).apply { SecureRandom().nextBytes(this) }
-        return argon2.hash(Argon2Mode.ARGON2_ID, p.toByteArray(), salt, Constants.ARGON2_ITERATIONS, Constants.ARGON2_MEMORY, Constants.ARGON2_PARALLELISM, Constants.ARGON2_HASH_LENGTH).encodedOutputAsString()
+        val passBytes = String(p).toByteArray(StandardCharsets.UTF_8)
+        try {
+            return argon2.hash(Argon2Mode.ARGON2_ID, passBytes, salt, Constants.ARGON2_ITERATIONS, Constants.ARGON2_MEMORY, Constants.ARGON2_PARALLELISM, Constants.ARGON2_HASH_LENGTH).encodedOutputAsString()
+        } finally {
+            passBytes.fill(0)
+        }
     }
 
-    fun verifyPassword(p: String, h: String): Boolean = try { argon2.verify(Argon2Mode.ARGON2_ID, h, p.toByteArray()) } catch (e: Exception) { false }
+    fun verifyPassword(p: CharArray, h: String): Boolean = try {
+        val passBytes = String(p).toByteArray(StandardCharsets.UTF_8)
+        try {
+            argon2.verify(Argon2Mode.ARGON2_ID, h, passBytes)
+        } finally {
+            passBytes.fill(0)
+        }
+    } catch (e: Exception) { false }
 
     fun publicKeyToString(pk: PublicKey): String = Base64.getEncoder().encodeToString(pk.encoded)
 
@@ -353,9 +373,14 @@ object E2EManager {
         return SecretKeySpec(derived, "AES")
     }
 
-    fun deriveMnemonicKey(s: String, salt: ByteArray): SecretKeySpec {
-        val derived = HKDF.deriveKey(s.toByteArray(StandardCharsets.UTF_8), salt, "TorChat/v2/storage/mnemonic".toByteArray(), 32)
-        return SecretKeySpec(derived, "AES")
+    fun deriveMnemonicKey(s: CharArray, salt: ByteArray): SecretKeySpec {
+        val passBytes = String(s).toByteArray(StandardCharsets.UTF_8)
+        try {
+            val derived = HKDF.deriveKey(passBytes, salt, "TorChat/v2/storage/mnemonic".toByteArray(), 32)
+            return SecretKeySpec(derived, "AES")
+        } finally {
+            passBytes.fill(0)
+        }
     }
 
     fun encrypt(txt: String, sk: SecretKey): String {

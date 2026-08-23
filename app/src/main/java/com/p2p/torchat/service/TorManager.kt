@@ -85,4 +85,13 @@ class TorManager(private val context: Context) {
     fun setTorRunning(onionAddress: String) {
         checkTorHealth(onionAddress)
     }
+
+    /**
+     * Resets Tor state to Stopped.
+     * Note: Since Orbot is an external process, we can't kill it directly,
+     * but we stop tracking it and clear the onion address from the current session.
+     */
+    fun stopTor() {
+        _torState.value = TorState.Stopped
+    }
 }
