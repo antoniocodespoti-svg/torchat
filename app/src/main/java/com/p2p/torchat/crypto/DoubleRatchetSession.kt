@@ -17,12 +17,13 @@ class DoubleRatchetSession(
     initialPeerRatchetPublicKey: PublicKey? = null
 ) {
     private val mutex = Mutex()
+    private var isDestroyed = false
 
     private var rootKey = initialRootKey
     private var sendChainKey: ByteArray? = null
     private var receiveChainKey: ByteArray? = null
 
-    private var myRatchetKeyPair = initialMyRatchetKeyPair
+    private var myRatchetKeyPair: KeyPair? = initialMyRatchetKeyPair
     private var peerRatchetPublicKey = initialPeerRatchetPublicKey
 
     private var nSend = 0 // Message Number for sending
@@ -58,12 +59,13 @@ class DoubleRatchetSession(
      * Advances the sending chain and returns a new Message Key and Ratchet Header.
      */
     suspend fun nextSendKey(): SendResult = mutex.withLock {
+        check(!isDestroyed) { "Session destroyed" }
         if (sendChainKey == null) {
             if (peerRatchetPublicKey != null) {
                 pn = nSend
                 nSend = 0
                 myRatchetKeyPair = E2EManager.generateEphemeralKeyPair()
-                val dhOut = E2EManager.calculateSharedSecret(myRatchetKeyPair.private, peerRatchetPublicKey!!)
+                val dhOut = E2EManager.calculateSharedSecret(myRatchetKeyPair!!.private, peerRatchetPublicKey!!)
                 val (newRoot, newSendCK) = E2EManager.kdfRoot(rootKey, dhOut)
                 rootKey = newRoot
                 sendChainKey = newSendCK
@@ -75,7 +77,7 @@ class DoubleRatchetSession(
         val (nextCK, mk) = E2EManager.kdfChain(sendChainKey!!, "constant")
         sendChainKey = nextCK
 
-        val header = RatchetHeader(myRatchetKeyPair.public, pn, nSend)
+        val header = RatchetHeader(myRatchetKeyPair!!.public, pn, nSend)
         val result = SendResult(mk, header)
 
         nSend++
@@ -88,16 +90,17 @@ class DoubleRatchetSession(
      */
     suspend fun tryDecrypt(
         header: RatchetHeader,
-        encB64: String,
+        encBytes: ByteArray,
         aad: ByteArray,
-        decryptFn: (String, ByteArray, ByteArray) -> String
-    ): String = mutex.withLock {
+        decryptFn: (ByteArray, ByteArray, ByteArray) -> ByteArray
+    ): ByteArray = mutex.withLock {
+        check(!isDestroyed) { "Session destroyed" }
         val pubKeyStr = E2EManager.publicKeyToString(header.ratchetPublicKey)
 
         // 1. Check skipped keys (out-of-order)
         skippedMessageKeys[pubKeyStr to header.n]?.let { key ->
             try {
-                val decrypted = decryptFn(encB64, key, aad)
+                val decrypted = decryptFn(encBytes, key, aad)
                 // Secure deletion of consumed skipped key (Audit P1)
                 key.fill(0)
                 skippedMessageKeys.remove(pubKeyStr to header.n)
@@ -134,7 +137,7 @@ class DoubleRatchetSession(
             val (nextCK, mk) = E2EManager.kdfChain(receiveChainKey!!, "constant")
 
             // 6. Try to decrypt before committing state
-            val decrypted = decryptFn(encB64, mk, aad)
+            val decrypted = decryptFn(encBytes, mk, aad)
 
             // 7. Successful decryption: Commit state and add temp skipped keys
             mk.fill(0) // Securely wipe temporary message key (Audit P1)
@@ -146,9 +149,9 @@ class DoubleRatchetSession(
 
         } catch (e: Exception) {
             // 8. ROLLBACK state on failure
-            rootKey = snapshotRootKey
-            sendChainKey = snapshotSendCK
-            receiveChainKey = snapshotRecvCK
+            rootKey = snapshotRootKey.copyOf()
+            sendChainKey = snapshotSendCK?.copyOf()
+            receiveChainKey = snapshotRecvCK?.copyOf()
             myRatchetKeyPair = snapshotMyKeyPair
             peerRatchetPublicKey = snapshotPeerPK
             nSend = snapshotNSend
@@ -158,6 +161,11 @@ class DoubleRatchetSession(
             // Wipe temp skipped keys on failure
             tempSkipped.values.forEach { it.fill(0) }
             throw e
+        } finally {
+            // Memory Hygiene: Explicitly zero out snapshots (Audit Point)
+            snapshotRootKey.fill(0)
+            snapshotSendCK?.fill(0)
+            snapshotRecvCK?.fill(0)
         }
     }
 
@@ -168,14 +176,14 @@ class DoubleRatchetSession(
         peerRatchetPublicKey = newPeerPubKey
 
         // Receiving Chain
-        val dhOutRecv = E2EManager.calculateSharedSecret(myRatchetKeyPair.private, peerRatchetPublicKey!!)
+        val dhOutRecv = E2EManager.calculateSharedSecret(myRatchetKeyPair!!.private, peerRatchetPublicKey!!)
         val (rootAfterRecv, newRecvCK) = E2EManager.kdfRoot(rootKey, dhOutRecv)
         rootKey = rootAfterRecv
         receiveChainKey = newRecvCK
 
         // Sending Chain
         myRatchetKeyPair = E2EManager.generateEphemeralKeyPair()
-        val dhOutSend = E2EManager.calculateSharedSecret(myRatchetKeyPair.private, peerRatchetPublicKey!!)
+        val dhOutSend = E2EManager.calculateSharedSecret(myRatchetKeyPair!!.private, peerRatchetPublicKey!!)
         val (rootAfterSend, newSendCK) = E2EManager.kdfRoot(rootKey, dhOutSend)
         rootKey = rootAfterSend
         sendChainKey = newSendCK
@@ -214,24 +222,28 @@ class DoubleRatchetSession(
     }
 
     fun BobInit(peerPubKey: PublicKey) {
+        check(!isDestroyed) { "Session destroyed" }
         peerRatchetPublicKey = peerPubKey
-        val dhOut = E2EManager.calculateSharedSecret(myRatchetKeyPair.private, peerRatchetPublicKey!!)
+        val dhOut = E2EManager.calculateSharedSecret(myRatchetKeyPair!!.private, peerRatchetPublicKey!!)
         val (newRoot, newRecvCK) = E2EManager.kdfRoot(rootKey, dhOut)
         rootKey = newRoot
         receiveChainKey = newRecvCK
     }
 
     /**
-     * Securely wipes all cryptographic material from RAM.
+     * Securely wipes all cryptographic material from RAM and marks session as destroyed.
      * Resolves Audit Point 14.
      */
     suspend fun destroy() = mutex.withLock {
+        if (isDestroyed) return@withLock
         rootKey.fill(0)
         sendChainKey?.fill(0)
         receiveChainKey?.fill(0)
         skippedMessageKeys.values.forEach { it.fill(0) }
         skippedMessageKeys.clear()
-        // Note: myRatchetKeyPair.private might not be directly wipeable depending on Provider,
-        // but we've zeroed the keys derived from it.
+
+        myRatchetKeyPair = null
+        peerRatchetPublicKey = null
+        isDestroyed = true
     }
 }

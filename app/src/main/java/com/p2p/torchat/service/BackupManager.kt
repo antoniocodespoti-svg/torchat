@@ -90,7 +90,6 @@ class BackupManager(private val context: Context) {
             context.getSharedPreferences("tor_chat_prefs", Context.MODE_PRIVATE).edit().apply {
                 putString("my_alias", data.myAlias)
                 putLong("account_expiry_date", data.accountExpiryDate)
-                putString("saved_seed", seed.joinToString(" "))
                 putString("saved_peers", serializePeers(data.peers))
                 apply()
             }

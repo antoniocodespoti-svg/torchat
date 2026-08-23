@@ -128,11 +128,20 @@ class MainActivity : ComponentActivity() {
         if (masterPasswordHash == null) {
             if (p.isNotEmpty() && p == c) {
                 val h = E2EManager.hashPassword(p)
-                getSharedPreferences("supermaster_prefs", Context.MODE_PRIVATE).edit().putString("super_password_hash", h).apply()
+                currentSeed = MnemonicManager.generateMnemonic()
+                getSharedPreferences("supermaster_prefs", Context.MODE_PRIVATE).edit()
+                    .putString("super_password_hash", h)
+                    .putString("super_seed", currentSeed.joinToString(" "))
+                    .apply()
                 masterPasswordHash = h; currentScreen = SuperScreen.SeedBackup
             }
         } else if (E2EManager.verifyPassword(p, masterPasswordHash ?: "")) {
-            failedAttempts = 0; getSharedPreferences("supermaster_prefs", Context.MODE_PRIVATE).edit().putInt("failed_attempts", 0).apply(); currentScreen = SuperScreen.Directory
+            failedAttempts = 0
+            val prefs = getSharedPreferences("supermaster_prefs", Context.MODE_PRIVATE)
+            prefs.edit().putInt("failed_attempts", 0).apply()
+            val s = prefs.getString("super_seed", null)
+            if (s != null) currentSeed = s.split(" ")
+            currentScreen = SuperScreen.Directory
         } else {
             failedAttempts++; getSharedPreferences("supermaster_prefs", Context.MODE_PRIVATE).edit().putInt("failed_attempts", failedAttempts).apply(); if (failedAttempts >= 3) performWipe() else Toast.makeText(this, "No", Toast.LENGTH_SHORT).show()
         }
@@ -144,8 +153,6 @@ class MainActivity : ComponentActivity() {
     private fun loadPreferences() {
         val p = getSharedPreferences("supermaster_prefs", Context.MODE_PRIVATE)
         masterPasswordHash = p.getString("super_password_hash", null); failedAttempts = p.getInt("failed_attempts", 0); isAutoBackupEnabled = p.getBoolean("is_auto_backup_enabled", false); loadCollaborators()
-        val s = p.getString("super_seed", null)
-        if (s != null) currentSeed = s.split(" ") else { currentSeed = MnemonicManager.generateMnemonic(); p.edit().putString("super_seed", currentSeed.joinToString(" ")).apply() }
     }
 
     private fun getOrCreateSalt(): ByteArray {

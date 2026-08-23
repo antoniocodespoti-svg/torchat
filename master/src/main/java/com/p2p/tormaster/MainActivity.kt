@@ -190,14 +190,21 @@ class MainActivity : ComponentActivity() {
         if (masterPasswordHash == null) {
             if (p.isNotEmpty() && p == c) {
                 val h = E2EManager.hashPassword(p)
-                getSharedPreferences("master_prefs", Context.MODE_PRIVATE).edit().putString("master_password_hash", h).apply()
+                currentSeed = MnemonicManager.generateMnemonic()
+                getSharedPreferences("master_prefs", Context.MODE_PRIVATE).edit()
+                    .putString("master_password_hash", h)
+                    .putString("master_seed", currentSeed.joinToString(" "))
+                    .apply()
                 masterPasswordHash = h
                 currentScreen = MasterScreen.SeedBackup
                 return true
             }
         } else if (E2EManager.verifyPassword(p, masterPasswordHash ?: "")) {
             failedAttempts = 0
-            getSharedPreferences("master_prefs", Context.MODE_PRIVATE).edit().putInt("failed_attempts", 0).apply()
+            val prefs = getSharedPreferences("master_prefs", Context.MODE_PRIVATE)
+            prefs.edit().putInt("failed_attempts", 0).apply()
+            val s = prefs.getString("master_seed", null)
+            if (s != null) currentSeed = s.split(" ")
             currentScreen = MasterScreen.Wallet
             return true
         } else {
@@ -243,13 +250,6 @@ class MainActivity : ComponentActivity() {
         masterPasswordHash = p.getString("master_password_hash", null)
         failedAttempts = p.getInt("failed_attempts", 0)
         isAutoBackupEnabled = p.getBoolean("is_auto_backup_enabled", false)
-        val s = p.getString("master_seed", null)
-        if (s != null) {
-            currentSeed = s.split(" ")
-        } else {
-            currentSeed = MnemonicManager.generateMnemonic()
-            p.edit().putString("master_seed", currentSeed.joinToString(" ")).apply()
-        }
     }
 
     private fun getOrCreateSalt(): ByteArray {

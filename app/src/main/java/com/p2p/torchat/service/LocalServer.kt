@@ -24,8 +24,7 @@ data class RawPacket(
     val ratchetPubKey: String,
     val pn: Int,
     val n: Int,
-    val dataB64: String,
-    val senderAddress: String // IP/Host of the incoming connection
+    val data: ByteArray
 )
 
 /**
@@ -166,8 +165,7 @@ class LocalServer(
                     return@launch
                 }
 
-                val rawData = String(payloadBytes, Charsets.UTF_8).trim()
-                if (rawData.isEmpty()) return@launch
+                if (payloadBytes.isEmpty()) return@launch
 
                 onPacketReceived(
                     RawPacket(
@@ -178,8 +176,7 @@ class LocalServer(
                         ratchetPubKey = ratchetPubKey,
                         pn = pn,
                         n = n,
-                        dataB64 = rawData,
-                        senderAddress = socket.inetAddress.hostAddress ?: "unknown"
+                        data = payloadBytes
                     )
                 )
 

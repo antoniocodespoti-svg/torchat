@@ -29,7 +29,7 @@ object P2PMessenger {
         ratchetPubKey: String,
         pn: Int,
         n: Int,
-        encryptedDataB64: String,
+        encryptedData: ByteArray,
         timeoutMs: Int = 30000,
         socksProxyHost: String = "127.0.0.1",
         socksProxyPort: Int = Constants.TOR_SOCKS_PORT,
@@ -54,9 +54,8 @@ object P2PMessenger {
 
                 val dos = DataOutputStream(socket.getOutputStream())
 
-                // Add bucketed padding to the base64 data to hide exact length
-                val paddedData = addBucketedPadding(encryptedDataB64)
-                val dataBytes = paddedData.toByteArray(Charsets.UTF_8)
+                // Add bucketed padding to the binary data to hide exact length
+                val dataBytes = addBucketedPadding(encryptedData)
 
                 if (dataBytes.size > 1048576) {
                     return@withContext Result.failure(IllegalArgumentException("Payload exceeds 1MB limit"))
@@ -95,11 +94,19 @@ object P2PMessenger {
         }
     }
 
-    private fun addBucketedPadding(data: String): String {
+    private fun addBucketedPadding(data: ByteArray): ByteArray {
         // Standard bucket sizes to prevent traffic analysis on message length
         val buckets = listOf(1024, 4096, 16384, 65536, 262144, 1048576)
-        val targetSize = buckets.find { it > data.length } ?: data.length
-        return data.padEnd(targetSize, ' ')
+        val targetSize = buckets.find { it > data.size } ?: data.size
+        if (targetSize <= data.size) return data
+
+        val padded = ByteArray(targetSize)
+        System.arraycopy(data, 0, padded, 0, data.size)
+        // Fill the rest with random bytes (padding)
+        val paddingSize = targetSize - data.size
+        val padding = ByteArray(paddingSize).apply { Random.nextBytes(this) }
+        System.arraycopy(padding, 0, padded, data.size, paddingSize)
+        return padded
     }
 
     private fun sanitizeOnion(o: String): String =
