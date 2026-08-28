@@ -12,9 +12,20 @@ import com.p2p.torchat.service.TorState
 import java.nio.charset.StandardCharsets
 import java.util.UUID
 
+import java.util.concurrent.atomic.AtomicInteger
+
 class ChatRepository(
     private val torManager: TorManager,
 ) {
+    private val networkSequence = AtomicInteger(0)
+
+    init {
+        // Initialize from vault if already unlocked
+        PrivacyController.vaultData.value?.networkSequence?.let {
+            networkSequence.set(it)
+        }
+    }
+
     suspend fun sendMessage(peer: Peer, content: String): Result<Message> {
         val session = SessionManager.getSession(peer.onionAddress) ?: return Result.failure(Exception("No active session"))
         val myOnion = (torManager.torState.value as? TorState.Running)?.onionAddress ?: return Result.failure(Exception("Tor not running"))
@@ -24,7 +35,7 @@ class ChatRepository(
             val header = sendResult.header
             val rpkStr = E2EManager.publicKeyToString(header.ratchetPublicKey)
 
-            val msgSeq = (PrivacyController.vaultData.value?.networkSequence ?: 0) + 1
+            val msgSeq = networkSequence.incrementAndGet()
 
             val aad = E2EManager.buildAAD(1, PayloadType.CHAT_MESSAGE.ordinal.toByte(), msgSeq, myOnion, session.sessionId, rpkStr, header.pn, header.n)
             val encrypted = try {
@@ -45,6 +56,20 @@ class ChatRepository(
                 sequenceNumber = msgSeq
             )
 
+            // Fix FINDING-002: Durable Commit - Persist state BEFORE sending
+            PrivacyController.updateVault { current ->
+                val history = current.chatHistory.toMutableMap()
+                val peerList = history.getOrDefault(peer.onionAddress, emptyList()).toMutableList()
+                peerList.add(msg)
+                history[peer.onionAddress] = peerList
+
+                current.copy(
+                    chatHistory = history,
+                    sessionStates = SessionManager.getAllSessionsState(),
+                    networkSequence = msgSeq
+                )
+            }
+
             val res = P2PMessenger.sendEncryptedPayload(
                 myOnion = myOnion,
                 recipientOnion = peer.onionAddress,
@@ -57,25 +82,9 @@ class ChatRepository(
             )
 
             if (res.isSuccess) {
-                val deliveredMsg = msg.copy(isDelivered = true)
-
-                // Atomic persistence to the vault (Audit Point 2)
-                PrivacyController.updateVault { current ->
-                    val history = current.chatHistory.toMutableMap()
-                    val peerList = history.getOrDefault(peer.onionAddress, emptyList()).toMutableList()
-                    peerList.add(deliveredMsg)
-                    history[peer.onionAddress] = peerList
-
-                    // Also snapshot the ratchet state change
-                    current.copy(
-                        chatHistory = history,
-                        sessionStates = SessionManager.getAllSessionsState(),
-                        networkSequence = msgSeq
-                    )
-                }
-
-                Result.success(deliveredMsg)
+                Result.success(msg.copy(isDelivered = true))
             } else {
+                // We keep it in history as not delivered, but the ratchet has advanced.
                 Result.success(msg.copy(isError = true))
             }
         } catch (e: Exception) {

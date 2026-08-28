@@ -169,7 +169,11 @@ class DoubleRatchetSession(
             receiveChainKey?.fill(0)
             receiveChainKey = nextCK
             nRecv++
-            skippedMessageKeys.putAll(tempSkipped)
+
+            // Fix FINDING-001: Store deep copies to avoid zeroization in finally block
+            tempSkipped.forEach { (key, value) ->
+                skippedMessageKeys[key] = value.copyOf()
+            }
 
             return@withLock decrypted
 
