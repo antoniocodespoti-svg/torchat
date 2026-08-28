@@ -35,7 +35,6 @@ import java.io.File
 import java.io.InputStreamReader
 import java.security.*
 import java.util.Base64
-import java.util.concurrent.atomic.AtomicInteger
 import java.util.UUID
 
 class MainActivity : ComponentActivity() {
@@ -53,7 +52,6 @@ class MainActivity : ComponentActivity() {
     private val peersList = mutableStateListOf<Peer>()
     private val messagesMap = mutableStateMapOf<String, MutableList<Message>>()
     private val unreadCounts = mutableStateMapOf<String, Int>()
-    private val networkSequence = AtomicInteger(0)
 
     private var currentScreenState by mutableStateOf<Screen>(Screen.Auth)
     private var isAuthenticated by mutableStateOf(false)
@@ -97,6 +95,30 @@ class MainActivity : ComponentActivity() {
                             isAuthenticated = false
                             currentScreenState = Screen.Auth
                             Logger.w("UI state wiped via SecurityEvent")
+                        }
+                    }
+                }
+            }
+        }
+
+        // Sync local UI state with the Vault (Audit Point 2: Persistence)
+        lifecycleScope.launch {
+            PrivacyController.vaultData.collect { vault ->
+                if (vault != null) {
+                    withContext(Dispatchers.Main) {
+                        // Sync peers
+                        if (peersList.size != vault.peers.size) {
+                            peersList.clear()
+                            peersList.addAll(vault.peers)
+                        }
+
+                        // Sync messages
+                        vault.chatHistory.forEach { (onion, msgs) ->
+                            val local = messagesMap.getOrPut(onion) { mutableStateListOf() }
+                            if (local.size != msgs.size) {
+                                local.clear()
+                                local.addAll(msgs)
+                            }
                         }
                     }
                 }
@@ -205,11 +227,6 @@ class MainActivity : ComponentActivity() {
                     isAuthenticated = true
                     failedAttempts = 0
                     isVaultCreated = true
-
-                    val vault = PrivacyController.vaultData.value
-                    peersList.clear()
-                    peersList.addAll(vault?.peers ?: emptyList())
-
                     currentScreenState = Screen.Home
                 }
             } catch (e: SecurityException) {
@@ -440,8 +457,23 @@ class MainActivity : ComponentActivity() {
                                     attachment = null,
                                     sequenceNumber = packet.sequenceNumber
                                 )
-                                messagesMap.getOrPut(onion) { mutableStateListOf() }.add(msg)
-                                if (currentScreenState !is Screen.Chat || (currentScreenState as Screen.Chat).peer.onionAddress != onion) unreadCounts[onion] = (unreadCounts[onion] ?: 0) + 1
+
+                                // Atomic persistence to the vault (Audit Point 2)
+                                PrivacyController.updateVault { current ->
+                                    val history = current.chatHistory.toMutableMap()
+                                    val peerList = history.getOrDefault(onion, emptyList()).toMutableList()
+                                    peerList.add(msg)
+                                    history[onion] = peerList
+
+                                    current.copy(
+                                        chatHistory = history,
+                                        sessionStates = SessionManager.getAllSessionsState()
+                                    )
+                                }
+
+                                if (currentScreenState !is Screen.Chat || (currentScreenState as Screen.Chat).peer.onionAddress != onion) {
+                                     unreadCounts[onion] = (unreadCounts[onion] ?: 0) + 1
+                                }
                                 notificationHelper.showChatNotification(onion, "Nuovo messaggio")
                             } catch (e: Exception) {
                                 Logger.e("Decryption error")

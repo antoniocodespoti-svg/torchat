@@ -2,6 +2,7 @@ package com.p2p.torchat.crypto
 
 import android.content.Context
 import com.google.gson.Gson
+import com.p2p.torchat.model.Message
 import com.p2p.torchat.model.Peer
 import com.p2p.torchat.util.Logger
 import java.io.File
@@ -23,7 +24,10 @@ data class VaultData(
     val isAvailable: Boolean = false,
     val expiryDate: Long = 0L,
     val failedAttempts: Int = 0,
-    val isTermsAccepted: Boolean = false
+    val isTermsAccepted: Boolean = false,
+    val chatHistory: Map<String, List<Message>> = emptyMap(),
+    val sessionStates: Map<String, DoubleRatchetState> = emptyMap(),
+    val networkSequence: Int = 0
 )
 
 /**

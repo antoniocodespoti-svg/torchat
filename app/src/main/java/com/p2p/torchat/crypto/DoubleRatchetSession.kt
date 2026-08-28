@@ -4,11 +4,31 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.security.KeyPair
 import java.security.PublicKey
+import java.security.KeyFactory
+import java.security.spec.X509EncodedKeySpec
+import java.util.Base64
 
 /**
- * Full Double Ratchet Session implementation (v2.6).
+ * Serializable state of a Double Ratchet Session.
+ */
+data class DoubleRatchetState(
+    val sessionId: String,
+    val rootKey: String,
+    val sendChainKey: String?,
+    val receiveChainKey: String?,
+    val myRatchetPrivateKey: String,
+    val myRatchetPublicKey: String,
+    val peerRatchetPublicKey: String?,
+    val nSend: Int,
+    val nRecv: Int,
+    val pn: Int,
+    val skippedMessageKeys: Map<String, String> // (PubKeyStr_N) -> KeyStr
+)
+
+/**
+ * Full Double Ratchet Session implementation (v2.7).
  * Adheres to the Signal Double Ratchet specification.
- * Resolves Audit Point 2 & RATCHET-TX (Transactional updates).
+ * Resolves Audit Point 2 & 21 (Immediate Forward Secrecy Hardening).
  */
 class DoubleRatchetSession(
     val sessionId: String,
@@ -75,6 +95,9 @@ class DoubleRatchetSession(
         }
 
         val (nextCK, mk) = E2EManager.kdfChain(sendChainKey!!, "constant")
+
+        // Immediate Zeroization of old chain key (Audit Point 21)
+        sendChainKey?.fill(0)
         sendChainKey = nextCK
 
         val header = RatchetHeader(myRatchetKeyPair!!.public, pn, nSend)
@@ -140,7 +163,10 @@ class DoubleRatchetSession(
             val decrypted = decryptFn(encBytes, mk, aad)
 
             // 7. Successful decryption: Commit state and add temp skipped keys
-            mk.fill(0) // Securely wipe temporary message key (Audit P1)
+            mk.fill(0)
+
+            // Immediate Zeroization of old chain key (Audit Point 21)
+            receiveChainKey?.fill(0)
             receiveChainKey = nextCK
             nRecv++
             skippedMessageKeys.putAll(tempSkipped)
@@ -179,6 +205,11 @@ class DoubleRatchetSession(
         // Receiving Chain
         val dhOutRecv = E2EManager.calculateSharedSecret(myRatchetKeyPair!!.private, peerRatchetPublicKey!!)
         val (rootAfterRecv, newRecvCK) = E2EManager.kdfRoot(rootKey, dhOutRecv)
+
+        // Immediate Zeroization of root key and old receiving chain key
+        rootKey.fill(0)
+        receiveChainKey?.fill(0)
+
         rootKey = rootAfterRecv
         receiveChainKey = newRecvCK
 
@@ -186,8 +217,16 @@ class DoubleRatchetSession(
         myRatchetKeyPair = E2EManager.generateEphemeralKeyPair()
         val dhOutSend = E2EManager.calculateSharedSecret(myRatchetKeyPair!!.private, peerRatchetPublicKey!!)
         val (rootAfterSend, newSendCK) = E2EManager.kdfRoot(rootKey, dhOutSend)
+
+        // Immediate Zeroization of root key and old sending chain key
+        rootKey.fill(0)
+        sendChainKey?.fill(0)
+
         rootKey = rootAfterSend
         sendChainKey = newSendCK
+
+        dhOutRecv.fill(0)
+        dhOutSend.fill(0)
     }
 
     private fun skipMessageKeysInternal(untilN: Int, tempMap: MutableMap<Pair<String, Int>, ByteArray>) {
@@ -212,12 +251,16 @@ class DoubleRatchetSession(
 
         while (tempN < untilN) {
             val (nextCK, mk) = E2EManager.kdfChain(tempCK, "constant")
+            // Wipe old tempCK if it's not the original receiveChainKey (which we wipe later)
+            if (tempCK !== receiveChainKey) tempCK.fill(0)
+
             tempCK = nextCK
             tempMap[currentPeerKeyStr to tempN] = mk
             tempN++
         }
 
         // Update local pointers for the next steps in tryDecrypt
+        receiveChainKey?.fill(0)
         receiveChainKey = tempCK
         nRecv = tempN
     }
@@ -227,8 +270,65 @@ class DoubleRatchetSession(
         peerRatchetPublicKey = peerPubKey
         val dhOut = E2EManager.calculateSharedSecret(myRatchetKeyPair!!.private, peerRatchetPublicKey!!)
         val (newRoot, newRecvCK) = E2EManager.kdfRoot(rootKey, dhOut)
+
+        rootKey.fill(0)
+        receiveChainKey?.fill(0)
+
         rootKey = newRoot
         receiveChainKey = newRecvCK
+        dhOut.fill(0)
+    }
+
+    /**
+     * Exports the session state for persistence.
+     */
+    fun toState(): DoubleRatchetState {
+        return DoubleRatchetState(
+            sessionId = sessionId,
+            rootKey = Base64.getEncoder().encodeToString(rootKey),
+            sendChainKey = sendChainKey?.let { Base64.getEncoder().encodeToString(it) },
+            receiveChainKey = receiveChainKey?.let { Base64.getEncoder().encodeToString(it) },
+            myRatchetPrivateKey = Base64.getEncoder().encodeToString(myRatchetKeyPair!!.private.encoded),
+            myRatchetPublicKey = E2EManager.publicKeyToString(myRatchetKeyPair!!.public),
+            peerRatchetPublicKey = peerRatchetPublicKey?.let { E2EManager.publicKeyToString(it) },
+            nSend = nSend,
+            nRecv = nRecv,
+            pn = pn,
+            skippedMessageKeys = skippedMessageKeys.map { (key, value) ->
+                "${key.first}_${key.second}" to Base64.getEncoder().encodeToString(value)
+            }.toMap()
+        )
+    }
+
+    companion object {
+        fun fromState(state: DoubleRatchetState): DoubleRatchetSession {
+            val rootKey = Base64.getDecoder().decode(state.rootKey)
+
+            // Reconstruct JCA KeyPair from encoded bytes
+            val privBytes = Base64.getDecoder().decode(state.myRatchetPrivateKey)
+            val kf = KeyFactory.getInstance("X25519")
+            val priv = kf.generatePrivate(java.security.spec.PKCS8EncodedKeySpec(privBytes))
+            val pub = E2EManager.stringToPublicKey(state.myRatchetPublicKey, "X25519")
+
+            val myKeyPair = KeyPair(pub, priv)
+            val peerPubKey = state.peerRatchetPublicKey?.let { E2EManager.stringToPublicKey(it, "X25519") }
+
+            val session = DoubleRatchetSession(state.sessionId, rootKey, myKeyPair, peerPubKey)
+            session.sendChainKey = state.sendChainKey?.let { Base64.getDecoder().decode(it) }
+            session.receiveChainKey = state.receiveChainKey?.let { Base64.getDecoder().decode(it) }
+            session.nSend = state.nSend
+            session.nRecv = state.nRecv
+            session.pn = state.pn
+
+            state.skippedMessageKeys.forEach { (composite, keyStr) ->
+                val pts = composite.split("_")
+                val pkStr = pts[0]
+                val n = pts[1].toInt()
+                session.skippedMessageKeys[pkStr to n] = Base64.getDecoder().decode(keyStr)
+            }
+
+            return session
+        }
     }
 
     /**

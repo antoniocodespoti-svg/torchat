@@ -58,6 +58,10 @@ object P2PMessenger {
                     return@withContext Result.failure(IllegalArgumentException("Payload exceeds 1MB limit"))
                 }
 
+                val originalSize = encryptedData.size
+                // Resolves Audit Point 3: Padding for Traffic Analysis Protection
+                val paddedData = addBucketedPadding(encryptedData)
+
                 // 1. Write Binary Header
                 dos.writeByte(MAGIC_BYTE.toInt())
                 dos.writeByte(PROTOCOL_VERSION.toInt())
@@ -78,9 +82,10 @@ object P2PMessenger {
                 dos.writeInt(pn)
                 dos.writeInt(n)
 
-                // 5. Write Payload Length & Data
-                dos.writeInt(encryptedData.size)
-                dos.write(encryptedData)
+                // 5. Write Lengths & Data
+                dos.writeInt(originalSize) // Real payload size
+                dos.writeInt(paddedData.size) // Total size sent (bucketed)
+                dos.write(paddedData)
                 dos.flush()
 
                 socket.close()

@@ -15,8 +15,6 @@ import java.util.UUID
 class ChatRepository(
     private val torManager: TorManager,
 ) {
-    private var networkSequence = 0
-
     suspend fun sendMessage(peer: Peer, content: String): Result<Message> {
         val session = SessionManager.getSession(peer.onionAddress) ?: return Result.failure(Exception("No active session"))
         val myOnion = (torManager.torState.value as? TorState.Running)?.onionAddress ?: return Result.failure(Exception("Tor not running"))
@@ -25,7 +23,8 @@ class ChatRepository(
             val sendResult = session.nextSendKey()
             val header = sendResult.header
             val rpkStr = E2EManager.publicKeyToString(header.ratchetPublicKey)
-            val msgSeq = ++networkSequence
+
+            val msgSeq = (PrivacyController.vaultData.value?.networkSequence ?: 0) + 1
 
             val aad = E2EManager.buildAAD(1, PayloadType.CHAT_MESSAGE.ordinal.toByte(), msgSeq, myOnion, session.sessionId, rpkStr, header.pn, header.n)
             val encrypted = try {
@@ -58,7 +57,24 @@ class ChatRepository(
             )
 
             if (res.isSuccess) {
-                Result.success(msg.copy(isDelivered = true))
+                val deliveredMsg = msg.copy(isDelivered = true)
+
+                // Atomic persistence to the vault (Audit Point 2)
+                PrivacyController.updateVault { current ->
+                    val history = current.chatHistory.toMutableMap()
+                    val peerList = history.getOrDefault(peer.onionAddress, emptyList()).toMutableList()
+                    peerList.add(deliveredMsg)
+                    history[peer.onionAddress] = peerList
+
+                    // Also snapshot the ratchet state change
+                    current.copy(
+                        chatHistory = history,
+                        sessionStates = SessionManager.getAllSessionsState(),
+                        networkSequence = msgSeq
+                    )
+                }
+
+                Result.success(deliveredMsg)
             } else {
                 Result.success(msg.copy(isError = true))
             }

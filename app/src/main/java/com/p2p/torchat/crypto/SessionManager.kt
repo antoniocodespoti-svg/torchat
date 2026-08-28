@@ -34,4 +34,20 @@ object SessionManager {
      * but ensuring it follows the new suspend protocol.
      */
     suspend fun lock() = destroyAll()
+
+    /**
+     * Returns a map of all active session states for persistence.
+     */
+    fun getAllSessionsState(): Map<String, DoubleRatchetState> {
+        return activeSessions.mapValues { it.value.toState() }
+    }
+
+    /**
+     * Restores sessions from persisted states.
+     */
+    fun restoreSessions(states: Map<String, DoubleRatchetState>) {
+        states.forEach { (onion, state) ->
+            activeSessions[onion] = DoubleRatchetSession.fromState(state)
+        }
+    }
 }

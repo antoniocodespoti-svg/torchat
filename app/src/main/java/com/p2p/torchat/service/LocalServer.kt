@@ -149,21 +149,31 @@ class LocalServer(
                     return@launch
                 }
 
-                // 9. Read Payload Length
-                val length = dis.readInt()
-                if (length !in 1..MAX_PAYLOAD_SIZE) {
-                    Log.w(TAG, "Invalid payload length: $length")
+                // 9. Read Payload Lengths
+                val realLength = dis.readInt()
+                val bucketedLength = dis.readInt()
+
+                if (bucketedLength !in 1..MAX_PAYLOAD_SIZE) {
+                    Log.w(TAG, "Invalid payload length: $bucketedLength")
                     return@launch
                 }
 
-                // 10. Read Payload
-                val payloadBytes = ByteArray(length)
+                if (realLength !in 1..bucketedLength) {
+                    Log.w(TAG, "Invalid real length: $realLength (bucketed: $bucketedLength)")
+                    return@launch
+                }
+
+                // 10. Read Padded Payload
+                val paddedBytes = ByteArray(bucketedLength)
                 try {
-                    dis.readFully(payloadBytes)
+                    dis.readFully(paddedBytes)
                 } catch (e: java.io.EOFException) {
                     Log.w(TAG, "Incomplete payload received from ${socket.inetAddress}")
                     return@launch
                 }
+
+                // 11. Strip Padding
+                val payloadBytes = paddedBytes.sliceArray(0 until realLength)
 
                 if (payloadBytes.isEmpty()) return@launch
 

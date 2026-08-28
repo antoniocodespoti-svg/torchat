@@ -122,6 +122,9 @@ object PrivacyController {
             vaultKey = currentVaultKey
             _vaultData.value = data
 
+            // Restore sessions from vault (Audit Point 2: Persistence)
+            SessionManager.restoreSessions(data.sessionStates)
+
             // Start Services
             localServer?.startServer()
             data.myOnion?.let { torManager?.setTorRunning(it) }
@@ -179,6 +182,13 @@ object PrivacyController {
         } catch (e: Exception) {
             null
         }
+    }
+
+    /**
+     * Snapshots the current RAM state (sessions) and persists it to the vault.
+     */
+    suspend fun persistSessionState() = updateVault {
+        it.copy(sessionStates = SessionManager.getAllSessionsState())
     }
 
     private fun CharArray.toUtf8ByteArray_v6(): ByteArray {
